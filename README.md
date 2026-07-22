@@ -1,6 +1,6 @@
 # DeviceCryptor
 
-Post-quantum-ready rewrite of VeraCrypt for **Windows** and **Linux**, written in **Rust** (no JavaScript).
+Post-quantum-ready rewrite of VeraCrypt for **Windows** and **Linux**, written in **Rust**.
 
 > **Early development.** This project is young and **not fully tested**. Do not rely on it for real data yet. We would love help exercising builds, mounts, and edge cases on Linux and Windows — bug reports and test results are welcome.
 
