@@ -55,6 +55,6 @@ VeraCrypt’s in-tree `src/Boot` remains useful for BIOS/legacy notes; **UEFI Wi
 
 - `vendor/VeraCrypt` — TrueCrypt License 3.0 (legacy) + Apache-2.0 (VeraCrypt additions)
 - `vendor/VeraCrypt-DCS` — **LGPL-3.0**
-- DeviceCryptor-original code — Apache-2.0 OR MIT
+- DeviceCryptor-original code — Apache-2.0
 
 **Policy:** do not statically link LGPL DCS objects into DeviceCryptor release EFI images. Reimplement module boundaries and on-disk/boot contracts; keep DCS as the oracle. If a future release deliberately incorporates LGPL DCS code, ship corresponding source and LGPL notices.
