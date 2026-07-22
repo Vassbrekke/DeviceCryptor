@@ -1,0 +1,7 @@
+[submodule "vendor/VeraCrypt"]
+	path = vendor/VeraCrypt
+	url = https://github.com/veracrypt/VeraCrypt.git
+	branch = VeraCrypt_1.26.29
+[submodule "vendor/VeraCrypt-DCS"]
+	path = vendor/VeraCrypt-DCS
+	url = https://github.com/veracrypt/VeraCrypt-DCS.git

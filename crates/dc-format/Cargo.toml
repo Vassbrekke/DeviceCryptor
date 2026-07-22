@@ -1,0 +1,17 @@
+[package]
+name = "dc-format"
+description = "DC01 and VeraCrypt volume header formats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+dc-crypto = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+byteorder = "1.5"
+blake3 = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

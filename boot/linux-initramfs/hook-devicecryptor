@@ -1,0 +1,20 @@
+#!/bin/sh
+# DeviceCryptor Linux initramfs unlock hook (scaffold).
+# Install into /etc/initramfs-tools/hooks/ and scripts/local-top/
+# Behavior aligned with VeraCrypt Linux system-encryption unlock flow.
+
+PREREQ=""
+prereqs() { echo "$PREREQ"; }
+
+case "$1" in
+prereqs) prereqs; exit 0 ;;
+esac
+
+. /usr/share/initramfs-tools/hook-functions
+
+# Copy unlock helper into initramfs when present.
+if [ -x /usr/bin/dc ]; then
+    copy_exec /usr/bin/dc /bin
+fi
+
+exit 0

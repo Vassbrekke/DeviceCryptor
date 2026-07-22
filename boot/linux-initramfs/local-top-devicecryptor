@@ -1,0 +1,42 @@
+#!/bin/sh
+# local-top script: prompt for DeviceCryptor system volume password and unlock.
+# Place in /etc/initramfs-tools/scripts/local-top/devicecryptor
+
+PREREQ="udev"
+prereqs() { echo "$PREREQ"; }
+
+case "$1" in
+prereqs) prereqs; exit 0 ;;
+esac
+
+DC_DEVICE="${DC_SYSTEM_DEVICE:-}"
+DC_MAPPER="${DC_MAPPER_NAME:-dcroot}"
+
+if [ -z "$DC_DEVICE" ]; then
+    # No DeviceCryptor system device configured.
+    exit 0
+fi
+
+if [ ! -x /bin/dc ]; then
+    echo "DeviceCryptor: dc binary missing in initramfs" >&2
+    exit 0
+fi
+
+echo "DeviceCryptor: unlocking $DC_DEVICE"
+# Full block-mapper integration lands with the Linux dm helper;
+# this scaffold validates the password against the volume header.
+/bin/dc info --password-env DC_PASSWORD "$DC_DEVICE" 2>/dev/null || {
+    printf "Password: "
+    stty -echo
+    read -r DC_PASSWORD
+    stty echo
+    echo
+    export DC_PASSWORD
+    /bin/dc info --password-env DC_PASSWORD "$DC_DEVICE" || {
+        echo "DeviceCryptor: unlock failed" >&2
+        exit 1
+    }
+}
+
+echo "DeviceCryptor: header unlocked (mapper attach TODO: $DC_MAPPER)"
+exit 0

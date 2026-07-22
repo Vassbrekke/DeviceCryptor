@@ -1,0 +1,16 @@
+[package]
+name = "dc-fuzz"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+libfuzzer-sys = "0.4"
+dc-format = { path = "../crates/dc-format" }
+dc-crypto = { path = "../crates/dc-crypto" }
+
+[[bin]]
+name = "header_parse"
+path = "fuzz_targets/header_parse.rs"
+test = false
+doc = false

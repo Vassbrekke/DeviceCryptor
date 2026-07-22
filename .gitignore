@@ -1,0 +1,12 @@
+/target/
+**/*.rs.bk
+.idea/
+.vscode/
+*.dc
+*.img
+.DS_Store
+*.mount
+fuzz/target/
+fuzz/corpus/
+fuzz/artifacts/
+testdata/

@@ -1,0 +1,30 @@
+[package]
+name = "dc-crypto"
+description = "DeviceCryptor cryptographic primitives"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+aes = { workspace = true }
+xts-mode = { workspace = true }
+argon2 = { workspace = true }
+blake3 = { workspace = true }
+sha2 = { workspace = true }
+hmac = { workspace = true }
+pbkdf2 = { workspace = true }
+crc32fast = { workspace = true }
+zeroize = { workspace = true }
+subtle = { workspace = true }
+thiserror = { workspace = true }
+rand = { workspace = true }
+rand_core = { workspace = true }
+getrandom = { workspace = true }
+ml-kem = { workspace = true }
+kem = "0.3.0-pre.0"
+hkdf = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

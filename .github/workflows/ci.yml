@@ -1,0 +1,40 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: fmt
+        run: cargo fmt --all -- --check
+      - name: build
+        run: cargo build -p dc-crypto -p dc-format -p dc-volume -p dc-platform -p dc-cli
+      - name: test
+        run: cargo test -p dc-crypto -p dc-format -p dc-volume -p dc-platform -p dc-cli -- --test-threads=1
+      - name: clippy
+        run: cargo clippy -p dc-crypto -p dc-format -p dc-volume -p dc-platform -p dc-cli -- -D warnings
+      - name: linux e2e
+        run: ./scripts/linux-test.sh
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo-audit
+        run: |
+          cargo install cargo-audit
+          cargo audit

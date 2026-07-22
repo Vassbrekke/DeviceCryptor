@@ -1,0 +1,24 @@
+DeviceCryptor
+Copyright 2026 DeviceCryptor contributors
+
+This product includes original software dual-licensed under the Apache License,
+Version 2.0, and the MIT License (see LICENSE-APACHE and LICENSE-MIT).
+
+---------------------------------------------------------------------------
+Third-party reference (not linked into release binaries)
+---------------------------------------------------------------------------
+
+vendor/VeraCrypt is a pinned copy of https://github.com/veracrypt/VeraCrypt
+(tag VeraCrypt_1.26.29). Portions of that tree are derived from TrueCrypt 7.1a
+and are governed by the TrueCrypt License 3.0; VeraCrypt modifications are
+under the Apache License 2.0. See vendor/VeraCrypt/src/License.txt.
+
+vendor/VeraCrypt-DCS is a pinned copy of
+https://github.com/veracrypt/VeraCrypt-DCS (EFI bootloader for Windows system
+encryption), governed by the GNU Lesser General Public License v3.0. See
+vendor/VeraCrypt-DCS/LICENSE.
+
+Behavioral compatibility (volume headers, PIM→KDF mapping, EFI PBA / BlockIo
+intercept design) was reimplemented from those specifications for
+interoperability. No VeraCrypt or VeraCrypt-DCS object code is compiled into
+DeviceCryptor release binaries.

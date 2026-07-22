@@ -1,0 +1,21 @@
+[package]
+name = "dc-cli"
+description = "DeviceCryptor command-line interface"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "dc"
+path = "src/main.rs"
+
+[dependencies]
+dc-volume = { workspace = true }
+dc-format = { workspace = true }
+dc-crypto = { workspace = true }
+dc-platform = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+zeroize = { workspace = true }
+serde_json = { workspace = true }
