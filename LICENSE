@@ -1,0 +1,18 @@
+DeviceCryptor is dual-licensed under either of:
+
+  * Apache License, Version 2.0
+    (see LICENSE-APACHE or https://www.apache.org/licenses/LICENSE-2.0)
+  * MIT license
+    (see LICENSE-MIT or https://opensource.org/licenses/MIT)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in DeviceCryptor by you shall be dual-licensed
+as above, without any additional terms or conditions.
+
+Copyright (c) 2026 DeviceCryptor contributors
+
+See NOTICE for third-party vendor references (VeraCrypt, VeraCrypt-DCS).
+Those trees keep their own licenses and are not compiled into DeviceCryptor
+release binaries.

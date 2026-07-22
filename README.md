@@ -48,4 +48,6 @@ See [docs/UPSTREAM_MAP.md](docs/UPSTREAM_MAP.md) (includes **VeraCrypt-DCS** EFI
 
 ## License
 
-DeviceCryptor-original code: Apache-2.0 OR MIT. Vendor VeraCrypt / VeraCrypt-DCS retain their own licenses (`NOTICE`).
+DeviceCryptor original code is dual-licensed **Apache-2.0 OR MIT** (your choice). See [`LICENSE`](LICENSE), [`LICENSE-APACHE`](LICENSE-APACHE), and [`LICENSE-MIT`](LICENSE-MIT).
+
+Vendor trees under `vendor/` keep their own licenses (VeraCrypt / TrueCrypt terms, VeraCrypt-DCS LGPL-3.0) — see [`NOTICE`](NOTICE). They are reference-only and are not linked into DeviceCryptor release binaries.
