@@ -2,6 +2,8 @@
 
 Post-quantum-ready rewrite of VeraCrypt for **Windows** and **Linux**, written in **Rust** (no JavaScript).
 
+> **Early development.** This project is young and **not fully tested**. Do not rely on it for real data yet. We would love help exercising builds, mounts, and edge cases on Linux and Windows — bug reports and test results are welcome.
+
 - **Defaults:** AES-256-XTS + Argon2id (`DC01` format)
 - **Compat:** mount VeraCrypt/TrueCrypt volumes (oracle-tested against `vendor/VeraCrypt`)
 - **Windows EFI PBA:** rewrite guided by [`vendor/VeraCrypt-DCS`](https://github.com/veracrypt/VeraCrypt-DCS) (LGPL reference)
