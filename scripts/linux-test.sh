@@ -7,11 +7,10 @@ cd "$ROOT"
 
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/target}"
 DC="${DC:-$ROOT/target/debug/dc}"
-if [[ ! -x "$DC" ]]; then
-  echo "building dc…"
-  cargo build -p dc-cli
-  DC="$ROOT/target/debug/dc"
-fi
+# Always rebuild so the harness exercises the current tree (not a stale binary).
+echo "building dc…"
+cargo build -p dc-cli
+DC="$ROOT/target/debug/dc"
 
 WORKDIR="${WORKDIR:-$ROOT/testdata/linux-e2e}"
 rm -rf "$WORKDIR"
@@ -34,13 +33,14 @@ echo 'hello from linux e2e' > "$WORKDIR/mnt/readme.txt"
 mkdir -p "$WORKDIR/mnt/docs"
 echo 'nested' > "$WORKDIR/mnt/docs/a.txt"
 "$DC" status | grep -q e2e1
-"$DC" dismount --id e2e1 --password "$PASS" --keyfile "$KF"
+# Dismount: id only — no password/keyfile (session from mount)
+"$DC" dismount --id e2e1
 
 echo "== remount verify persistence =="
 "$DC" mount "$WORKDIR/vol.dc" "$WORKDIR/mnt2" --password "$PASS" --keyfile "$KF" --id e2e2
 grep -q 'hello from linux e2e' "$WORKDIR/mnt2/readme.txt"
 grep -q 'nested' "$WORKDIR/mnt2/docs/a.txt"
-"$DC" dismount --id e2e2 --password "$PASS" --keyfile "$KF"
+"$DC" dismount --id e2e2
 
 echo "== wrong password rejected =="
 if "$DC" info "$WORKDIR/vol.dc" --password 'wrong-password' --keyfile "$KF" 2>/dev/null; then
@@ -54,13 +54,13 @@ echo "== hidden volume =="
   --hidden-size 8388608 --hidden-password "$HPASS"
 "$DC" mount "$WORKDIR/hidden.dc" "$WORKDIR/mnt-outer" --password "$PASS" --id outer1 --fs fat32
 echo 'outer-visible' > "$WORKDIR/mnt-outer/outer.txt"
-"$DC" dismount --id outer1 --password "$PASS"
+"$DC" dismount --id outer1
 "$DC" mount "$WORKDIR/hidden.dc" "$WORKDIR/mnt-hidden" --password "$HPASS" --id hid1 --fs fat32
 echo 'secret-hidden' > "$WORKDIR/mnt-hidden/secret.txt"
-"$DC" dismount --id hid1 --password "$HPASS"
+"$DC" dismount --id hid1
 "$DC" mount "$WORKDIR/hidden.dc" "$WORKDIR/mnt-hidden" --password "$HPASS" --id hid2 --fs fat32
 grep -q 'secret-hidden' "$WORKDIR/mnt-hidden/secret.txt"
-"$DC" dismount --id hid2 --password "$HPASS"
+"$DC" dismount --id hid2
 "$DC" mount "$WORKDIR/hidden.dc" "$WORKDIR/mnt-outer" --password "$PASS" --id outer2 --fs fat32
 grep -q 'outer-visible' "$WORKDIR/mnt-outer/outer.txt"
 # Outer must not show hidden file
@@ -68,7 +68,7 @@ if [[ -e "$WORKDIR/mnt-outer/secret.txt" ]]; then
   echo "ERROR: hidden file visible in outer mount" >&2
   exit 1
 fi
-"$DC" dismount --id outer2 --password "$PASS"
+"$DC" dismount --id outer2
 
 echo "== unit tests =="
 cargo test -p dc-crypto -p dc-format -p dc-volume -p dc-cli -- --test-threads=1

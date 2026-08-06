@@ -22,15 +22,27 @@ Covers: create FAT32, keyfiles, mount/write/dismount persistence, wrong password
 ```bash
 ./target/debug/dc create ./vol.dc --size 16777216 --password 'secret' --fs fat32
 mkdir mnt
+# Mount needs password (+ optional keyfile). Dismount does not.
 ./target/debug/dc mount ./vol.dc ./mnt --password 'secret' --id t1
 echo hi > ./mnt/hi.txt
-./target/debug/dc dismount --id t1 --password 'secret'
+./target/debug/dc dismount --id t1
 
 mkdir mnt2
 ./target/debug/dc mount ./vol.dc ./mnt2 --password 'secret' --id t2
 cat ./mnt2/hi.txt
-./target/debug/dc dismount --id t2 --password 'secret'
+./target/debug/dc dismount --id t2
 ```
+
+## Mount / dismount workflow
+
+| Action | Credentials |
+|--------|-------------|
+| **Mount** | Password required; keyfile(s) optional (`--keyfile`) |
+| **Dismount** | Mount id only (`dc dismount` / `dc dismount --id …`) — **no password** |
+
+On mount, DeviceCryptor caches the unlocked master key in a user-private session file
+(`~/.local/state/devicecryptor/<id>.session`, mode `0600`) so checkin can sync without
+re-prompting. The session file is wiped on dismount.
 
 ## Mount backends
 
@@ -48,10 +60,10 @@ Checkout mounts are not live kernel mounts: edit files in the mountpoint directo
   --hidden-password hidden --fs fat32
 ./target/debug/dc mount ./h.dc ./outer --password outer --id o
 # … write decoy files …
-./target/debug/dc dismount --id o --password outer
+./target/debug/dc dismount --id o
 ./target/debug/dc mount ./h.dc ./hid --password hidden --id h
 # … write secret files …
-./target/debug/dc dismount --id h --password hidden
+./target/debug/dc dismount --id h
 ```
 
 Use `--protect-hidden` + `--hidden-password` when mounting the outer volume to refuse writes that would overwrite the hidden region.
@@ -61,6 +73,7 @@ Use `--protect-hidden` + `--hidden-password` when mounting the outer volume to r
 ```bash
 ./target/debug/dc create ./k.dc --password p --keyfile ./kf.bin --fs fat32
 ./target/debug/dc mount ./k.dc ./mnt --password p --keyfile ./kf.bin --id k
+./target/debug/dc dismount --id k
 ```
 
 ## Traveler / portable
@@ -78,5 +91,5 @@ sudo ./target/debug/dc create ./e.dc --size 67108864 --password p --fs ext4
 sudo mkdir /mnt/dc
 sudo ./target/debug/dc mount ./e.dc /mnt/dc --password p --fs ext4 --id e
 # use /mnt/dc as a normal filesystem
-sudo ./target/debug/dc dismount --id e --password p
+sudo ./target/debug/dc dismount --id e
 ```

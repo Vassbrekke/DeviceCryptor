@@ -16,9 +16,10 @@ Post-quantum-ready rewrite of VeraCrypt for **Windows** and **Linux**, written i
 cargo build -p dc-cli --release
 ./target/release/dc create ./test.dc --size 16777216 --password 'test-pass' --fs fat32
 mkdir mnt
+# Mount: password (+ optional --keyfile). Dismount: id only — no password.
 ./target/release/dc mount ./test.dc ./mnt --password 'test-pass'
 echo hi > ./mnt/hi.txt
-./target/release/dc dismount --password 'test-pass'
+./target/release/dc dismount
 ./scripts/linux-test.sh   # full harness
 ```
 
@@ -30,6 +31,8 @@ cargo build -p dc-gui --release
 ```
 
 Tabs: **Create**, **Mount**, **Dismount**, **Info**, **Status**, **Favorites**, **Keywrap** — same operations as `dc` (keyfiles, PIM, hidden volumes, wipe, FS type, protect-hidden, ML-KEM wrap).
+
+**Workflow:** mount asks for password (and optional keyfile); **dismount is one click** on Status (or enter mount id on Dismount) — no credentials again.
 
 See [docs/LINUX_TESTING.md](docs/LINUX_TESTING.md).
 

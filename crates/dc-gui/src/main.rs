@@ -18,7 +18,9 @@ use iced::widget::{
 use iced::{Element, Length, Task, Theme};
 
 #[cfg(target_os = "linux")]
-use dc_volume::{format_volume, linux_dismount, linux_mount, LinuxMountOptions};
+use dc_volume::{
+    format_volume, linux_dismount, linux_mount, list_mount_states, LinuxMountOptions, MountState,
+};
 
 fn main() -> iced::Result {
     iced::application("DeviceCryptor", App::update, App::view)
@@ -132,15 +134,15 @@ struct App {
 
     // Dismount
     dismount_id: String,
-    dismount_password: String,
-    dismount_keyfile: String,
-    dismount_pim: String,
 
     // Info
     info_path: String,
     info_password: String,
     info_keyfile: String,
     info_pim: String,
+
+    // Status (active mounts for click-to-dismount)
+    status_mounts: Vec<StatusRow>,
 
     // Favorites
     fav_path: String,
@@ -153,6 +155,14 @@ struct App {
     kw_dk: String,
     kw_infile: String,
     kw_outfile: String,
+}
+
+#[derive(Debug, Clone)]
+struct StatusRow {
+    id: String,
+    backend: String,
+    container: String,
+    mountpoint: String,
 }
 
 impl Default for App {
@@ -179,13 +189,11 @@ impl Default for App {
             mount_protect_hidden: false,
             mount_hidden_password: String::new(),
             dismount_id: "default".into(),
-            dismount_password: String::new(),
-            dismount_keyfile: String::new(),
-            dismount_pim: "0".into(),
             info_path: String::new(),
             info_password: String::new(),
             info_keyfile: String::new(),
             info_pim: "0".into(),
+            status_mounts: Vec::new(),
             fav_path: String::new(),
             fav_label: String::new(),
             fav_automount: false,
@@ -233,11 +241,9 @@ enum Message {
 
     // Dismount
     DismountId(String),
-    DismountPassword(String),
-    DismountKeyfile(String),
-    DismountPim(String),
-    BrowseDismountKeyfile,
     DoDismount,
+    /// Dismount a specific active mount (from Status list).
+    DoDismountId(String),
 
     // Info
     InfoPath(String),
@@ -250,6 +256,7 @@ enum Message {
 
     // Status
     DoStatus,
+    StatusLoaded(Result<Vec<StatusRow>, String>),
 
     // Favorites
     FavPath(String),
@@ -283,7 +290,7 @@ impl App {
                     return self.run_op(|| fav_list());
                 }
                 if t == Tab::Status {
-                    return self.run_op(|| status_list());
+                    return self.refresh_status();
                 }
             }
             Message::OpFinished(res) => {
@@ -303,13 +310,41 @@ impl App {
                                 self.mount_password.clear();
                                 self.mount_hidden_password.clear();
                             }
-                            Tab::Dismount => self.dismount_password.clear(),
                             Tab::Info => self.info_password.clear(),
                             _ => {}
                         }
                         self.status = s;
+                        // Keep the Status list in sync after mount/dismount without clobbering
+                        // the success line unless the user is on the Status tab.
+                        if self.tab == Tab::Status {
+                            return self.refresh_status();
+                        }
+                        if self.tab == Tab::Dismount || self.tab == Tab::Mount {
+                            return self.refresh_status_quiet();
+                        }
                     }
                     Err(e) => self.status = format!("error: {e}"),
+                }
+            }
+            Message::StatusLoaded(res) => {
+                self.busy = false;
+                match res {
+                    Ok(rows) => {
+                        self.status_mounts = rows;
+                        if self.tab == Tab::Status {
+                            if self.status_mounts.is_empty() {
+                                self.status = "(no mounts)".into();
+                            } else {
+                                self.status =
+                                    format!("{} active mount(s)", self.status_mounts.len());
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        if self.tab == Tab::Status {
+                            self.status = format!("error: {e}");
+                        }
+                    }
                 }
             }
 
@@ -375,17 +410,13 @@ impl App {
             }
 
             Message::DismountId(v) => self.dismount_id = v,
-            Message::DismountPassword(v) => self.dismount_password = v,
-            Message::DismountKeyfile(v) => self.dismount_keyfile = v,
-            Message::DismountPim(v) => self.dismount_pim = v,
-            Message::BrowseDismountKeyfile => {
-                if let Some(p) = rfd::FileDialog::new().set_title("Keyfile").pick_file() {
-                    self.dismount_keyfile = p.display().to_string();
-                }
-            }
             Message::DoDismount => {
-                let snap = DismountSnap::from(&*self);
-                return self.run_op(move || snap.run());
+                let id = self.dismount_id.clone();
+                return self.run_op(move || run_dismount(&id));
+            }
+            Message::DoDismountId(id) => {
+                self.dismount_id = id.clone();
+                return self.run_op(move || run_dismount(&id));
             }
 
             Message::InfoPath(v) => self.info_path = v,
@@ -410,7 +441,7 @@ impl App {
                 return self.run_op(move || snap.run());
             }
 
-            Message::DoStatus => return self.run_op(|| status_list()),
+            Message::DoStatus => return self.refresh_status(),
 
             Message::FavPath(v) => self.fav_path = v,
             Message::FavLabel(v) => self.fav_label = v,
@@ -557,6 +588,32 @@ impl App {
                 }
             },
             Message::OpFinished,
+        )
+    }
+
+    fn refresh_status(&mut self) -> Task<Message> {
+        if self.busy {
+            return Task::none();
+        }
+        self.busy = true;
+        self.spawn_status_load()
+    }
+
+    /// Update `status_mounts` without flipping busy or status text first.
+    fn refresh_status_quiet(&mut self) -> Task<Message> {
+        self.spawn_status_load()
+    }
+
+    fn spawn_status_load(&self) -> Task<Message> {
+        Task::perform(
+            async move {
+                match tokio::task::spawn_blocking(load_status_rows).await {
+                    Ok(Ok(rows)) => Ok(rows),
+                    Ok(Err(e)) => Err(e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                }
+            },
+            Message::StatusLoaded,
         )
     }
 
@@ -723,32 +780,19 @@ impl App {
 
     fn view_dismount(&self) -> Element<'_, Message> {
         column![
+            text("No password or keyfile needed — use the mount id from when you mounted.")
+                .size(13),
             row![
                 text("Mount ID"),
                 text_input("default", &self.dismount_id)
                     .on_input(Message::DismountId)
                     .padding(8)
-                    .width(160),
-                text("PIM"),
-                text_input("0", &self.dismount_pim)
-                    .on_input(Message::DismountPim)
-                    .padding(8)
-                    .width(80),
+                    .width(200),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
-            text_input("Password", &self.dismount_password)
-                .secure(true)
-                .on_input(Message::DismountPassword)
-                .padding(8),
-            labeled_row(
-                "Keyfile",
-                text_input("optional, comma-separated", &self.dismount_keyfile)
-                    .on_input(Message::DismountKeyfile)
-                    .padding(8),
-                button("Browse").on_press(Message::BrowseDismountKeyfile),
-            ),
-            button("Dismount / sync").on_press(Message::DoDismount),
+            button("Dismount / unmount").on_press(Message::DoDismount),
+            text("Tip: on Status you can also click Dismount next to each active mount.").size(12),
         ]
         .spacing(8)
         .into()
@@ -790,12 +834,37 @@ impl App {
     }
 
     fn view_status(&self) -> Element<'_, Message> {
-        column![
+        let mut col = column![
+            text("Active mounts — dismount with one click (no password).").size(13),
             button("Refresh mounts").on_press(Message::DoStatus),
-            text("Active mounts appear in Status below after refresh."),
         ]
-        .spacing(8)
-        .into()
+        .spacing(8);
+
+        if self.status_mounts.is_empty() {
+            col = col.push(text("(no mounts)"));
+        } else {
+            for m in &self.status_mounts {
+                let id = m.id.clone();
+                col = col.push(
+                    row![
+                        column![
+                            text(format!("id: {}", m.id)).size(14),
+                            text(format!("{} · {}", m.backend, m.container)).size(12),
+                            text(m.mountpoint.as_str()).size(12),
+                        ]
+                        .spacing(2)
+                        .width(Length::Fill),
+                        button("Dismount")
+                            .on_press(Message::DoDismountId(id))
+                            .style(iced::widget::button::danger),
+                    ]
+                    .spacing(12)
+                    .align_y(iced::Alignment::Center),
+                );
+            }
+        }
+
+        col.into()
     }
 
     fn view_favorites(&self) -> Element<'_, Message> {
@@ -1092,56 +1161,41 @@ impl MountSnap {
     }
 }
 
-struct DismountSnap {
-    id: String,
-    password: String,
-    keyfile: String,
-    pim: String,
-}
-
-impl From<&App> for DismountSnap {
-    fn from(a: &App) -> Self {
-        Self {
-            id: a.dismount_id.clone(),
-            password: a.dismount_password.clone(),
-            keyfile: a.dismount_keyfile.clone(),
-            pim: a.dismount_pim.clone(),
-        }
+fn run_dismount(id: &str) -> anyhow::Result<String> {
+    let id = if id.trim().is_empty() {
+        "default"
+    } else {
+        id.trim()
+    };
+    #[cfg(target_os = "linux")]
+    {
+        linux_dismount(id)?;
+        Ok(format!("dismounted {id}"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = id;
+        anyhow::bail!("dismount is implemented for Linux first");
     }
 }
 
-impl DismountSnap {
-    fn run(self) -> anyhow::Result<String> {
-        if self.password.is_empty() {
-            anyhow::bail!("password required");
-        }
-        let id = if self.id.trim().is_empty() {
-            "default".into()
-        } else {
-            self.id
-        };
-        let kfs = load_keyfiles(&self.keyfile)?;
-        let kf_refs: Vec<&[u8]> = kfs.iter().map(|v| v.as_slice()).collect();
-        let pim = parse_pim(&self.pim)?;
-        #[cfg(target_os = "linux")]
-        {
-            linux_dismount(
-                &id,
-                OpenOptions {
-                    password: self.password.as_bytes(),
-                    keyfiles: &kf_refs,
-                    pim,
-                    protect_hidden: false,
-                    hidden_password: None,
-                },
-            )?;
-            Ok(format!("dismounted {id}"))
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            let _ = (kf_refs, pim);
-            anyhow::bail!("dismount is implemented for Linux first");
-        }
+fn load_status_rows() -> anyhow::Result<Vec<StatusRow>> {
+    #[cfg(target_os = "linux")]
+    {
+        let states: Vec<MountState> = list_mount_states()?;
+        Ok(states
+            .into_iter()
+            .map(|st| StatusRow {
+                id: st.id,
+                backend: st.backend,
+                container: st.container.display().to_string(),
+                mountpoint: st.mountpoint.display().to_string(),
+            })
+            .collect())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Ok(Vec::new())
     }
 }
 
@@ -1187,43 +1241,6 @@ impl InfoSnap {
         );
         dismount_session(vol);
         Ok(msg)
-    }
-}
-
-fn status_list() -> anyhow::Result<String> {
-    #[cfg(target_os = "linux")]
-    {
-        let dir = dc_platform::default_mount_state_dir()?;
-        if !dir.exists() {
-            return Ok("(no mounts)".into());
-        }
-        let mut lines = Vec::new();
-        for e in fs::read_dir(dir)? {
-            let e = e?;
-            let p = e.path();
-            if p.extension().and_then(|x| x.to_str()) != Some("json") {
-                continue;
-            }
-            let data = fs::read_to_string(&p)?;
-            if let Ok(st) = serde_json::from_str::<dc_volume::MountState>(&data) {
-                lines.push(format!(
-                    "{}\t{}\t{}\t{}",
-                    st.id,
-                    st.backend,
-                    st.container.display(),
-                    st.mountpoint.display()
-                ));
-            }
-        }
-        if lines.is_empty() {
-            Ok("(no mounts)".into())
-        } else {
-            Ok(lines.join("\n"))
-        }
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        Ok("(status available on Linux)".into())
     }
 }
 

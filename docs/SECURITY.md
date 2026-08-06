@@ -14,6 +14,15 @@ actively exploitable crypto bugs before a fix is available.
 5. `cargo audit` must be clean of known critical advisories in CI before release.
 6. System encryption / boot paths require an external audit before 1.0.
 
+## Mount session keys (Linux checkout)
+
+While a volume is mounted, the unlocked master key is stored under
+`~/.local/state/devicecryptor/<id>.session` with mode `0600` so **dismount does not
+require re-entering the password** (standard VeraCrypt-like UX). The file is
+overwritten and removed on dismount. Anyone who can read that path while a volume
+is mounted can decrypt the container data area — protect the user account the same
+way you would any unlocked volume.
+
 ## Cryptography defaults
 
 | Purpose | Algorithm |

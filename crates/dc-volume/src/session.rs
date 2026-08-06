@@ -377,6 +377,46 @@ pub fn dismount_session(vol: MountedVolume) {
     drop(vol);
 }
 
+/// Re-open a container using a previously unlocked master key (no password).
+/// Used for passwordless dismount/checkin after mount cached the session key.
+pub fn open_with_master_key(
+    path: &Path,
+    master_key: &[u8],
+    kind: VolumeKind,
+    sector_size: u32,
+    data_offset: u64,
+    data_length: u64,
+    is_hidden: bool,
+) -> Result<MountedVolume, VolumeError> {
+    if master_key.len() != 64 {
+        return Err(VolumeError::Invalid("master key must be 64 bytes"));
+    }
+    if sector_size == 0 || sector_size % 16 != 0 {
+        return Err(VolumeError::Invalid("invalid sector size"));
+    }
+    let file = FsOpenOptions::new().read(true).write(true).open(path)?;
+    let xts = Aes256Xts::new(master_key).map_err(|e| VolumeError::Crypto(e.to_string()))?;
+    Ok(MountedVolume {
+        path: path.to_path_buf(),
+        kind,
+        sector_size,
+        data_offset,
+        data_length,
+        is_hidden,
+        hidden_protect_size: 0,
+        file,
+        xts,
+        master: SecureBytes::from_slice(master_key),
+    })
+}
+
+impl MountedVolume {
+    /// Master key material for AES-256-XTS (64 bytes). Session cache only.
+    pub(crate) fn master_key_bytes(&self) -> &[u8] {
+        self.master.as_slice()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

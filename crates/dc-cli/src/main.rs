@@ -74,18 +74,11 @@ enum Commands {
         #[arg(long)]
         hidden_password: Option<String>,
     },
-    /// Dismount and sync changes back into the container
+    /// Dismount and sync changes back into the container (no password — session from mount)
     Dismount {
+        /// Mount id from `dc mount --id …` (default: "default")
         #[arg(long, default_value = "default")]
         id: String,
-        #[arg(long)]
-        password: Option<String>,
-        #[arg(long)]
-        password_env: Option<String>,
-        #[arg(long)]
-        keyfile: Vec<PathBuf>,
-        #[arg(long, default_value_t = 0)]
-        pim: i32,
     },
     /// Show unlocked volume metadata
     Info {
@@ -318,7 +311,7 @@ fn run() -> Result<()> {
                 );
                 if st.backend == "fat-checkout" {
                     println!(
-                        "note: checkout mount — edit files in the mountpoint, then `dc dismount --id {id}` to sync"
+                        "note: checkout mount — edit files in the mountpoint, then `dc dismount --id {id}` to sync (no password)"
                     );
                 }
             }
@@ -328,35 +321,17 @@ fn run() -> Result<()> {
                 bail!("mount is implemented for Linux first; Windows mount uses the filter driver");
             }
         }
-        Commands::Dismount {
-            id,
-            password,
-            password_env,
-            keyfile,
-            pim,
-        } => {
+        Commands::Dismount { id } => {
             #[cfg(target_os = "linux")]
             {
                 let st =
                     load_mount_state(&id)?.ok_or_else(|| anyhow::anyhow!("not mounted: {id}"))?;
-                let pw = read_password(password, password_env)?;
-                let kfs = load_keyfiles(&keyfile)?;
-                let kf_refs: Vec<&[u8]> = kfs.iter().map(|v| v.as_slice()).collect();
-                linux_dismount(
-                    &id,
-                    OpenOptions {
-                        password: pw.as_bytes(),
-                        keyfiles: &kf_refs,
-                        pim,
-                        protect_hidden: false,
-                        hidden_password: None,
-                    },
-                )?;
+                linux_dismount(&id)?;
                 println!("dismounted {id} ({})", st.mountpoint.display());
             }
             #[cfg(not(target_os = "linux"))]
             {
-                let _ = (id, password, password_env, keyfile, pim);
+                let _ = id;
                 bail!("dismount is implemented for Linux first");
             }
         }
@@ -390,21 +365,12 @@ fn run() -> Result<()> {
         Commands::Status => {
             #[cfg(target_os = "linux")]
             {
-                let dir = dc_platform::default_mount_state_dir()?;
-                if !dir.exists() {
+                use dc_volume::list_mount_states;
+                let mounts = list_mount_states()?;
+                if mounts.is_empty() {
                     println!("(no mounts)");
-                    return Ok(());
-                }
-                let mut any = false;
-                for e in fs::read_dir(dir)? {
-                    let e = e?;
-                    let p = e.path();
-                    if p.extension().and_then(|x| x.to_str()) != Some("json") {
-                        continue;
-                    }
-                    let data = fs::read_to_string(&p)?;
-                    if let Ok(st) = serde_json::from_str::<dc_volume::MountState>(&data) {
-                        any = true;
+                } else {
+                    for st in mounts {
                         println!(
                             "{}\t{}\t{}\t{}",
                             st.id,
@@ -413,9 +379,6 @@ fn run() -> Result<()> {
                             st.mountpoint.display()
                         );
                     }
-                }
-                if !any {
-                    println!("(no mounts)");
                 }
             }
             #[cfg(not(target_os = "linux"))]
