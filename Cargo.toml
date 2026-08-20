@@ -17,10 +17,10 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/nolo/DeviceCryptor"
+repository = "https://github.com/Vassbrekke/DeviceCryptor"
 rust-version = "1.75"
 
 [workspace.dependencies]
@@ -51,3 +51,4 @@ ml-kem = { version = "0.2", features = ["deterministic"] }
 hkdf = "0.12"
 hex = "0.4"
 tempfile = "3.14"
+rpassword = "7.3"
