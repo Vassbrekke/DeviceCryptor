@@ -4,17 +4,13 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use dc_crypto::{
-    mlkem_decapsulate_key, mlkem_encapsulate_key, mlkem_generate_keypair, WrappedKey,
-};
+use dc_crypto::{mlkem_decapsulate_key, mlkem_encapsulate_key, mlkem_generate_keypair, WrappedKey};
 use dc_format::dc01::{DC01_DEFAULT_MEM_KIB, DC01_DEFAULT_PARALLELISM, DC01_DEFAULT_TIME};
 use dc_volume::{
     add_favorite, create_container, create_container_with_hidden, dismount_session, list_favorites,
     open_container, remove_favorite, CreateOptions, Favorite, FsType, OpenOptions,
 };
-use iced::widget::{
-    button, checkbox, column, pick_list, row, scrollable, text, text_input, Space,
-};
+use iced::widget::{button, checkbox, column, pick_list, row, scrollable, text, text_input, Space};
 use iced::{Element, Length, Task, Theme};
 
 #[cfg(target_os = "linux")]
@@ -384,10 +380,7 @@ impl App {
             Message::MountProtectHidden(v) => self.mount_protect_hidden = v,
             Message::MountHiddenPassword(v) => self.mount_hidden_password = v,
             Message::BrowseMountPath => {
-                if let Some(p) = rfd::FileDialog::new()
-                    .set_title("Container")
-                    .pick_file()
-                {
+                if let Some(p) = rfd::FileDialog::new().set_title("Container").pick_file() {
                     self.mount_path = p.display().to_string();
                 }
             }
@@ -424,10 +417,7 @@ impl App {
             Message::InfoKeyfile(v) => self.info_keyfile = v,
             Message::InfoPim(v) => self.info_pim = v,
             Message::BrowseInfoPath => {
-                if let Some(p) = rfd::FileDialog::new()
-                    .set_title("Container")
-                    .pick_file()
-                {
+                if let Some(p) = rfd::FileDialog::new().set_title("Container").pick_file() {
                     self.info_path = p.display().to_string();
                 }
             }
@@ -447,10 +437,7 @@ impl App {
             Message::FavLabel(v) => self.fav_label = v,
             Message::FavAutomount(v) => self.fav_automount = v,
             Message::BrowseFavPath => {
-                if let Some(p) = rfd::FileDialog::new()
-                    .set_title("Container")
-                    .pick_file()
-                {
+                if let Some(p) = rfd::FileDialog::new().set_title("Container").pick_file() {
                     self.fav_path = p.display().to_string();
                 }
             }
@@ -623,7 +610,9 @@ impl App {
             let btn = if *t == self.tab {
                 button(text(label)).on_press(Message::Tab(*t))
             } else {
-                button(text(label)).style(iced::widget::button::secondary).on_press(Message::Tab(*t))
+                button(text(label))
+                    .style(iced::widget::button::secondary)
+                    .on_press(Message::Tab(*t))
             };
             btn.into()
         }))
@@ -694,11 +683,7 @@ impl App {
                     .padding(8)
                     .width(100),
                 text("FS"),
-                pick_list(
-                    FsChoice::CREATE,
-                    Some(self.create_fs),
-                    Message::CreateFs
-                ),
+                pick_list(FsChoice::CREATE, Some(self.create_fs), Message::CreateFs),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
@@ -767,10 +752,13 @@ impl App {
             .align_y(iced::Alignment::Center),
             checkbox("Protect hidden volume", self.mount_protect_hidden)
                 .on_toggle(Message::MountProtectHidden),
-            text_input("Hidden password (if protecting)", &self.mount_hidden_password)
-                .secure(true)
-                .on_input(Message::MountHiddenPassword)
-                .padding(8),
+            text_input(
+                "Hidden password (if protecting)",
+                &self.mount_hidden_password
+            )
+            .secure(true)
+            .on_input(Message::MountHiddenPassword)
+            .padding(8),
             button("Mount").on_press(Message::DoMount),
             text("Linux FAT mounts use checkout/checkin — dismount to sync writes.").size(12),
         ]
@@ -1021,12 +1009,12 @@ impl CreateSnap {
             sparse: !self.wipe,
         };
 
-        let hidden_mb: Option<u64> = if self.hidden_mb.trim().is_empty() || self.hidden_mb.trim() == "0"
-        {
-            None
-        } else {
-            Some(self.hidden_mb.trim().parse::<u64>()?)
-        };
+        let hidden_mb: Option<u64> =
+            if self.hidden_mb.trim().is_empty() || self.hidden_mb.trim() == "0" {
+                None
+            } else {
+                Some(self.hidden_mb.trim().parse::<u64>()?)
+            };
 
         if let Some(hmb) = hidden_mb {
             if self.hidden_password.is_empty() {
