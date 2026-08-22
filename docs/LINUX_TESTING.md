@@ -15,12 +15,29 @@ cargo build -p dc-cli
 ./scripts/linux-test.sh
 ```
 
-Covers: create FAT32, keyfiles, mount/write/dismount persistence, wrong password, hidden volumes, unit tests.
+Covers: create FAT32, keyfiles, mount/write/dismount persistence, wrong password,
+header backup/chpasswd/restore, hidden volumes, unit tests.
+
+## Create sizes
+
+`--size` and `--hidden-size` accept bytes or binary units: `16M`, `1G`, `512K`.
+
+## Password change & header backup
+
+```bash
+./target/debug/dc header backup ./vol.dc ./vol.hdrbak
+./target/debug/dc chpasswd ./vol.dc --password old --new-password new
+./target/debug/dc header restore ./vol.dc ./vol.hdrbak   # optional rollback
+```
+
+`chpasswd` re-seals the DC01 header with a new salt/password while keeping the master key
+(data area is not rewritten). Backup files are mode `0600` and contain only header slots
+(first 128 KiB of the container layout), not file contents.
 
 ## Manual smoke
 
 ```bash
-./target/debug/dc create ./vol.dc --size 16777216 --password 'secret' --fs fat32
+./target/debug/dc create ./vol.dc --size 16M --password 'secret' --fs fat32
 mkdir mnt
 # Mount needs password (+ optional keyfile). Dismount does not.
 ./target/debug/dc mount ./vol.dc ./mnt --password 'secret' --id t1

@@ -1,15 +1,16 @@
 # DeviceCryptor
 
-Post-quantum-ready rewrite of VeraCrypt for **Windows** and **Linux**, written in **Rust**.
+Experimental Rust encrypted-container implementation with AES-256-XTS, Argon2id, and optional ML-KEM-768 key wrap. Linux file containers are the first working path; Windows and system encryption are not ready.
 
-> **v0.2 — Linux file containers are usable for testing.** Still not audited. Do not rely on it for irreplaceable data yet. Bug reports and test results on Linux and Windows are welcome.
+> **v0.2 — experimental.** Not independently audited. Do not use it for irreplaceable data. Bug reports and test results are welcome.
 
-- **Defaults:** AES-256-XTS + Argon2id (`DC01` format)
-- **Compat:** mount VeraCrypt/TrueCrypt volumes (oracle-tested against `vendor/VeraCrypt`)
-- **Windows EFI PBA:** rewrite guided by [`vendor/VeraCrypt-DCS`](https://github.com/veracrypt/VeraCrypt-DCS) (LGPL reference)
-- **PQ extras:** ML-KEM-768 key wrap for export
+- **Native format:** DC01 — AES-256-XTS + Argon2id + BLAKE3 header MAC
+- **Compat:** mount some VeraCrypt/TrueCrypt volumes (AES-XTS path; incomplete cipher/cascade coverage)
+- **PQ extras:** ML-KEM-768 wrapping for **key export**, not a post-quantum disk cipher
 - **UI:** `dc` CLI + `devicecryptor` iced GUI
 - **Ops:** password change, header backup/restore, human sizes, silent password prompts
+
+This is **not** a VeraCrypt replacement and is **not** “post-quantum-ready.” See [Assurance](#assurance).
 
 ## Quick start (Linux)
 
@@ -54,7 +55,7 @@ Tabs: **Create**, **Mount**, **Dismount**, **Info**, **Status**, **Favorites**, 
 
 **Workflow:** mount asks for password (and optional keyfile); **dismount is one click** on Status (or enter mount id on Dismount) — no credentials again.
 
-See [docs/LINUX_TESTING.md](docs/LINUX_TESTING.md), [docs/ROADMAP.md](docs/ROADMAP.md), [CHANGELOG.md](CHANGELOG.md).
+See [docs/LINUX_TESTING.md](docs/LINUX_TESTING.md), [docs/ASSURANCE.md](docs/ASSURANCE.md), [docs/ROADMAP.md](docs/ROADMAP.md), [CHANGELOG.md](CHANGELOG.md).
 
 ## Workspace
 
@@ -67,7 +68,20 @@ See [docs/LINUX_TESTING.md](docs/LINUX_TESTING.md), [docs/ROADMAP.md](docs/ROADM
 | `dc-cli` | `dc` binary |
 | `dc-gui` | iced GUI |
 
-See [docs/UPSTREAM_MAP.md](docs/UPSTREAM_MAP.md) (includes **VeraCrypt-DCS** EFI map), [docs/FORMAT.md](docs/FORMAT.md), [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md).
+See [docs/UPSTREAM_MAP.md](docs/UPSTREAM_MAP.md), [docs/FORMAT.md](docs/FORMAT.md) (working spec), [docs/THREAT_MODEL.md](docs/THREAT_MODEL.md) (draft).
+
+## Assurance
+
+DeviceCryptor is a new cryptographic product (unaudited). Primitive crates (`aes`, `argon2`, `ml-kem`, `getrandom`) are used rather than hand-rolled ciphers, but **composition, format, and mount path are not independently reviewed**.
+
+| In tree now | Not yet |
+|-------------|---------|
+| Unit tests, Linux e2e harness, `cargo audit` in CI | Independent cryptographic review |
+| Header libFuzzer target (`fuzz/`) | Differential tests vs known-good AES-XTS / ML-KEM implementations |
+| Working DC01 layout notes | Frozen format specification |
+| Draft threat model | Side-channel review; corruption/recovery campaign |
+
+Stronger language (“rewrite of VeraCrypt”, “post-quantum-ready”, production use) waits on the gates in [docs/ASSURANCE.md](docs/ASSURANCE.md) and [docs/AUDIT.md](docs/AUDIT.md).
 
 ## License
 

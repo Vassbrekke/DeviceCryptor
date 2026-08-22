@@ -1,5 +1,7 @@
 # Security Policy
 
+**Status:** v0.2 is experimental and has not had an independent cryptographic review. Do not store irreplaceable data in DeviceCryptor volumes. See [ASSURANCE.md](ASSURANCE.md).
+
 ## Reporting
 
 Report vulnerabilities privately to the maintainers. Do not open public issues for
@@ -22,6 +24,14 @@ require re-entering the password** (standard VeraCrypt-like UX). The file is
 overwritten and removed on dismount. Anyone who can read that path while a volume
 is mounted can decrypt the container data area — protect the user account the same
 way you would any unlocked volume.
+
+## Password change
+
+`dc chpasswd` re-seals the DC01 header with a new salt and password-derived header
+key; the volume master key and ciphertext are unchanged. Always take a
+`dc header backup` first if the volume is important. Prefer interactive prompts or
+`--password-env` over `--password` / `--new-password` on multi-user hosts (argv is
+visible to other processes).
 
 ## Cryptography defaults
 

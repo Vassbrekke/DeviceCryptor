@@ -236,7 +236,7 @@ pub fn open_container(path: &Path, opts: &OpenOptions<'_>) -> Result<MountedVolu
             sector_size: h.sector_size,
             data_offset: h.encrypted_area_start,
             data_length: h.encrypted_area_length,
-            is_hidden: false,
+            is_hidden: (h.flags & 1) != 0,
             hidden_protect_size: 0,
             file,
             xts,

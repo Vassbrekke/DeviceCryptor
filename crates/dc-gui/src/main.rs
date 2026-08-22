@@ -649,7 +649,7 @@ impl App {
         scrollable(
             column![
                 text("DeviceCryptor").size(28),
-                text("AES-256-XTS · Argon2id · DC01 — GUI parity with `dc` CLI").size(13),
+                text("experimental · unaudited — AES-256-XTS · Argon2id · DC01").size(13),
                 Space::with_height(8),
                 tabs,
                 Space::with_height(12),

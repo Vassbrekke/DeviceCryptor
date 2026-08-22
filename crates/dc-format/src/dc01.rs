@@ -70,6 +70,7 @@ pub fn create_dc01_header(
 }
 
 /// Create a header with explicit encrypted-area placement (used for hidden volumes).
+#[allow(clippy::too_many_arguments)]
 pub fn create_dc01_header_at(
     opts: &Dc01OpenOptions<'_>,
     volume_data_size: u64,
@@ -136,6 +137,68 @@ pub fn create_dc01_header_at(
     header[..SALT_SIZE].copy_from_slice(&salt);
     header[SALT_SIZE..].copy_from_slice(&payload);
     Ok((header, master))
+}
+
+/// Re-seal a DC01 header keeping the existing master key (password change / re-key).
+///
+/// Geometry and Argon2 params are taken from `opened`. A fresh salt is generated.
+pub fn seal_dc01_header_with_master(
+    opts: &Dc01OpenOptions<'_>,
+    opened: &Dc01Header,
+) -> Result<Vec<u8>, Dc01Error> {
+    if opened.master_key.len() != 64 {
+        return Err(Dc01Error::Invalid);
+    }
+    let mut salt = [0u8; SALT_SIZE];
+    fill_random(&mut salt).map_err(|e| Dc01Error::Crypto(e.to_string()))?;
+
+    let mut payload = [0u8; DC01_EFFECTIVE - SALT_SIZE];
+    payload[0..4].copy_from_slice(b"DC01");
+    LittleEndian::write_u16(&mut payload[4..6], DC01_VERSION);
+    LittleEndian::write_u16(&mut payload[6..8], opened.cipher_id);
+    LittleEndian::write_u16(&mut payload[8..10], opened.kdf_id);
+    LittleEndian::write_u16(&mut payload[10..12], opened.flags);
+    LittleEndian::write_u32(&mut payload[12..16], opened.time_cost);
+    LittleEndian::write_u32(&mut payload[16..20], opened.memory_kib);
+    LittleEndian::write_u32(&mut payload[20..24], opened.parallelism);
+    LittleEndian::write_u32(&mut payload[24..28], opened.sector_size);
+    LittleEndian::write_u64(&mut payload[28..36], opened.volume_data_size);
+    LittleEndian::write_u64(&mut payload[36..44], opened.encrypted_area_start);
+    LittleEndian::write_u64(&mut payload[44..52], opened.encrypted_area_length);
+    LittleEndian::write_u64(&mut payload[52..60], opened.hidden_volume_size);
+
+    payload[64..96].fill(0);
+    payload[96..160].copy_from_slice(opened.master_key.as_slice());
+
+    let mac = {
+        let mut h = Hasher::new();
+        h.update(&payload[0..64]);
+        h.update(&[0u8; 32]);
+        h.update(&payload[96..]);
+        h.finalize()
+    };
+    payload[64..96].copy_from_slice(mac.as_bytes());
+
+    let mut header_key = Zeroizing::new([0u8; 64]);
+    derive_dc01_header_key(
+        opts.password,
+        opts.keyfiles,
+        &salt,
+        opened.time_cost,
+        opened.memory_kib,
+        opened.parallelism,
+        header_key.as_mut(),
+    )
+    .map_err(|e| Dc01Error::Crypto(e.to_string()))?;
+
+    let xts = Aes256Xts::new(header_key.as_ref()).map_err(|e| Dc01Error::Crypto(e.to_string()))?;
+    xts.encrypt_sector(0, &mut payload)
+        .map_err(|e| Dc01Error::Crypto(e.to_string()))?;
+
+    let mut header = vec![0u8; DC01_EFFECTIVE];
+    header[..SALT_SIZE].copy_from_slice(&salt);
+    header[SALT_SIZE..].copy_from_slice(&payload);
+    Ok(header)
 }
 
 pub fn open_dc01_header(
@@ -286,5 +349,34 @@ mod tests {
             keyfiles: &[],
         };
         assert!(open_dc01_header(&hdr, &bad).is_err());
+    }
+
+    #[test]
+    fn seal_with_master_changes_password() {
+        let old = Dc01OpenOptions {
+            password: b"old-pass-phrase",
+            keyfiles: &[],
+        };
+        let (hdr, master) = create_dc01_header(
+            &old,
+            1024 * 1024,
+            512,
+            DC01_DEFAULT_TIME,
+            DC01_DEFAULT_MEM_KIB,
+            DC01_DEFAULT_PARALLELISM,
+        )
+        .unwrap();
+        let opened = open_dc01_header(&hdr, &old).unwrap();
+        assert_eq!(opened.master_key.as_slice(), master.as_slice());
+
+        let new = Dc01OpenOptions {
+            password: b"new-pass-phrase",
+            keyfiles: &[],
+        };
+        let resealed = seal_dc01_header_with_master(&new, &opened).unwrap();
+        assert!(open_dc01_header(&resealed, &old).is_err());
+        let again = open_dc01_header(&resealed, &new).unwrap();
+        assert_eq!(again.master_key.as_slice(), master.as_slice());
+        assert_eq!(again.volume_data_size, 1024 * 1024);
     }
 }

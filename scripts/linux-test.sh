@@ -14,15 +14,16 @@ DC="$ROOT/target/debug/dc"
 
 WORKDIR="${WORKDIR:-$ROOT/testdata/linux-e2e}"
 rm -rf "$WORKDIR"
-mkdir -p "$WORKDIR"/{mnt,mnt2,mnt-outer,mnt-hidden}
+mkdir -p "$WORKDIR"/{mnt,mnt2,mnt-outer,mnt-hidden,mnt-ch}
 
 PASS='linux-e2e-pass-phrase'
 HPASS='hidden-e2e-pass-phrase'
+NEWPASS='linux-e2e-new-pass'
 KF="$WORKDIR/keyfile.bin"
 dd if=/dev/urandom of="$KF" bs=1024 count=4 status=none
 
-echo "== create FAT32 volume with keyfile =="
-"$DC" create "$WORKDIR/vol.dc" --size 16777216 --password "$PASS" --fs fat32 --keyfile "$KF"
+echo "== create FAT32 volume with keyfile (human size) =="
+"$DC" create "$WORKDIR/vol.dc" --size 16M --password "$PASS" --fs fat32 --keyfile "$KF"
 
 echo "== info =="
 "$DC" info "$WORKDIR/vol.dc" --password "$PASS" --keyfile "$KF"
@@ -49,9 +50,25 @@ if "$DC" info "$WORKDIR/vol.dc" --password 'wrong-password' --keyfile "$KF" 2>/d
 fi
 echo "ok (rejected)"
 
+echo "== header backup / chpasswd / restore =="
+"$DC" header backup "$WORKDIR/vol.dc" "$WORKDIR/vol.hdrbak"
+"$DC" chpasswd "$WORKDIR/vol.dc" --password "$PASS" --new-password "$NEWPASS" --keyfile "$KF"
+if "$DC" info "$WORKDIR/vol.dc" --password "$PASS" --keyfile "$KF" 2>/dev/null; then
+  echo "ERROR: old password should fail after chpasswd" >&2
+  exit 1
+fi
+"$DC" info "$WORKDIR/vol.dc" --password "$NEWPASS" --keyfile "$KF" >/dev/null
+"$DC" mount "$WORKDIR/vol.dc" "$WORKDIR/mnt-ch" --password "$NEWPASS" --keyfile "$KF" --id e2e-ch
+grep -q 'hello from linux e2e' "$WORKDIR/mnt-ch/readme.txt"
+"$DC" dismount --id e2e-ch
+# Restore pre-chpasswd headers
+"$DC" header restore "$WORKDIR/vol.dc" "$WORKDIR/vol.hdrbak"
+"$DC" info "$WORKDIR/vol.dc" --password "$PASS" --keyfile "$KF" >/dev/null
+echo "ok (chpasswd + header backup/restore)"
+
 echo "== hidden volume =="
-"$DC" create "$WORKDIR/hidden.dc" --size 33554432 --password "$PASS" --fs fat32 \
-  --hidden-size 8388608 --hidden-password "$HPASS"
+"$DC" create "$WORKDIR/hidden.dc" --size 32M --password "$PASS" --fs fat32 \
+  --hidden-size 8M --hidden-password "$HPASS"
 "$DC" mount "$WORKDIR/hidden.dc" "$WORKDIR/mnt-outer" --password "$PASS" --id outer1 --fs fat32
 echo 'outer-visible' > "$WORKDIR/mnt-outer/outer.txt"
 "$DC" dismount --id outer1

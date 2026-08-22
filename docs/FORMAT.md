@@ -1,5 +1,7 @@
 # Volume Format Specification
 
+**Working draft.** Layout and field meanings for implementers and tests. Not a frozen on-disk contract until 1.0 (see [ASSURANCE.md](ASSURANCE.md)). Interoperability with other tools is not promised.
+
 ## DC01 (DeviceCryptor native — create path)
 
 New volumes use **DC01**. Layout mirrors VeraCrypt geometry so tools can reason about offsets, but on-disk crypto metadata is DeviceCryptor-specific.

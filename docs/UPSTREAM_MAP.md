@@ -42,7 +42,7 @@ VeraCrypt’s in-tree `src/Boot` remains useful for BIOS/legacy notes; **UEFI Wi
 
 | VeraCrypt path | DeviceCryptor target | Notes |
 |----------------|----------------------|-------|
-| `src/Crypto` | `crates/dc-crypto` | Audited Rust crates; PIM/Argon2 matched |
+| `src/Crypto` | `crates/dc-crypto` | Third-party primitive crates; PIM/Argon2 mapping matched to vendor tables |
 | `src/Common/Volumes.c`, `Volumes.h` | `crates/dc-format` | Header v5, salt, CRC, `VERA` |
 | `src/Common/Pkcs5.c` | `crates/dc-crypto` | PBKDF2 + `get_argon2_params` |
 | `src/Volume`, `src/Core`, `src/Mount`, `src/Format` | `crates/dc-volume`, `crates/dc-cli` | Create/mount/dismount |

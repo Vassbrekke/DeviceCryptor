@@ -9,8 +9,9 @@ use clap::{Parser, Subcommand};
 use dc_crypto::{mlkem_decapsulate_key, mlkem_encapsulate_key, mlkem_generate_keypair, WrappedKey};
 use dc_format::dc01::{DC01_DEFAULT_MEM_KIB, DC01_DEFAULT_PARALLELISM, DC01_DEFAULT_TIME};
 use dc_volume::{
-    add_favorite, create_container, create_container_with_hidden, dismount_session, list_favorites,
-    open_container, remove_favorite, CreateOptions, Favorite, FsType, OpenOptions,
+    add_favorite, backup_headers, change_password, create_container, create_container_with_hidden,
+    dismount_session, list_favorites, open_container, remove_favorite, restore_headers,
+    CreateOptions, Favorite, FsType, OpenOptions,
 };
 use zeroize::Zeroizing;
 
@@ -20,8 +21,9 @@ use dc_volume::{format_volume, linux_dismount, linux_mount, load_mount_state, Li
 #[derive(Parser, Debug)]
 #[command(
     name = "dc",
-    about = "DeviceCryptor — post-quantum-ready disk encryption",
-    version
+    about = "DeviceCryptor — experimental encrypted containers (unaudited)",
+    version,
+    after_help = "Password tip: omit --password to type it silently. Prefer --password-env over --password (avoids argv leaks)."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -33,8 +35,8 @@ enum Commands {
     /// Create a new DC01 container
     Create {
         path: PathBuf,
-        /// Total container size in bytes
-        #[arg(long, default_value_t = 16 * 1024 * 1024)]
+        /// Total container size (bytes, or human: 16M, 1G, 512K)
+        #[arg(long, default_value = "16M", value_parser = parse_size)]
         size: u64,
         #[arg(long)]
         password: Option<String>,
@@ -43,7 +45,7 @@ enum Commands {
         /// Filesystem: fat32 (default, unprivileged mount) | ext4 (needs root to mount) | none
         #[arg(long, default_value = "fat32")]
         fs: String,
-        #[arg(long)]
+        #[arg(long, value_parser = parse_size)]
         hidden_size: Option<u64>,
         #[arg(long)]
         hidden_password: Option<String>,
@@ -92,6 +94,26 @@ enum Commands {
         #[arg(long, default_value_t = 0)]
         pim: i32,
     },
+    /// Change volume password (DC01; keeps master key / ciphertext)
+    Chpasswd {
+        path: PathBuf,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long)]
+        password_env: Option<String>,
+        #[arg(long)]
+        new_password: Option<String>,
+        #[arg(long)]
+        keyfile: Vec<PathBuf>,
+        /// Keyfiles that will apply after the change (default: same as --keyfile)
+        #[arg(long)]
+        new_keyfile: Vec<PathBuf>,
+    },
+    /// Header backup / restore (primary + hidden slots)
+    Header {
+        #[command(subcommand)]
+        cmd: HeaderCmd,
+    },
     /// List active mounts
     Status,
     /// Favorites management
@@ -104,6 +126,17 @@ enum Commands {
         #[command(subcommand)]
         cmd: KeywrapCmd,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum HeaderCmd {
+    /// Write primary+hidden header slots to a backup file (mode 0600)
+    Backup {
+        container: PathBuf,
+        outfile: PathBuf,
+    },
+    /// Restore primary+hidden header slots from a backup file
+    Restore { container: PathBuf, infile: PathBuf },
 }
 
 #[derive(Subcommand, Debug)]
@@ -147,7 +180,47 @@ enum KeywrapCmd {
     },
 }
 
-fn read_password(opt: Option<String>, password_env: Option<String>) -> Result<Zeroizing<String>> {
+/// Parse sizes like `16777216`, `16M`, `1G`, `512K` (binary units).
+fn parse_size(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty size".into());
+    }
+    let (num, mult) = match s.as_bytes().last().map(|c| c.to_ascii_uppercase()) {
+        Some(b'K') => (&s[..s.len() - 1], 1024u64),
+        Some(b'M') => (&s[..s.len() - 1], 1024 * 1024),
+        Some(b'G') => (&s[..s.len() - 1], 1024 * 1024 * 1024),
+        Some(b'T') => (&s[..s.len() - 1], 1024u64.pow(4)),
+        _ => (s, 1u64),
+    };
+    let n: u64 = num
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid size: {s}"))?;
+    n.checked_mul(mult)
+        .ok_or_else(|| format!("size overflow: {s}"))
+}
+
+fn format_bytes(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut i = 0usize;
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.2} {}", UNITS[i])
+    }
+}
+
+fn read_password(
+    opt: Option<String>,
+    password_env: Option<String>,
+    prompt: &str,
+) -> Result<Zeroizing<String>> {
     if let Some(p) = opt {
         return Ok(Zeroizing::new(p));
     }
@@ -155,13 +228,35 @@ fn read_password(opt: Option<String>, password_env: Option<String>) -> Result<Ze
         let p = std::env::var(&var).with_context(|| format!("env {var}"))?;
         return Ok(Zeroizing::new(p));
     }
-    eprint!("Password: ");
-    let _ = io::stderr().flush();
-    let mut line = String::new();
-    io::stdin().read_line(&mut line)?;
-    Ok(Zeroizing::new(
-        line.trim_end_matches(['\r', '\n']).to_string(),
-    ))
+    // Silent TTY prompt when possible; fall back to stdin line (may echo on weird pipes).
+    match rpassword::prompt_password(prompt) {
+        Ok(p) => Ok(Zeroizing::new(p)),
+        Err(_) => {
+            eprint!("{prompt}");
+            let _ = io::stderr().flush();
+            let mut line = String::new();
+            io::stdin().read_line(&mut line)?;
+            Ok(Zeroizing::new(
+                line.trim_end_matches(['\r', '\n']).to_string(),
+            ))
+        }
+    }
+}
+
+fn read_password_confirmed(
+    opt: Option<String>,
+    prompt: &str,
+    confirm_prompt: &str,
+) -> Result<Zeroizing<String>> {
+    if let Some(p) = opt {
+        return Ok(Zeroizing::new(p));
+    }
+    let a = read_password(None, None, prompt)?;
+    let b = read_password(None, None, confirm_prompt)?;
+    if a.as_str() != b.as_str() {
+        bail!("passwords do not match");
+    }
+    Ok(a)
 }
 
 fn load_keyfiles(paths: &[PathBuf]) -> Result<Vec<Vec<u8>>> {
@@ -195,7 +290,7 @@ fn run() -> Result<()> {
             hidden_password,
             wipe,
         } => {
-            let pw = read_password(password, None)?;
+            let pw = read_password_confirmed(password, "Password: ", "Confirm password: ")?;
             let kfs = load_keyfiles(&keyfile)?;
             let kf_refs: Vec<&[u8]> = kfs.iter().map(|v| v.as_slice()).collect();
             let opts = CreateOptions {
@@ -210,7 +305,11 @@ fn run() -> Result<()> {
                 sparse: !wipe,
             };
             let hp = if hidden_size.is_some() {
-                Some(read_password(hidden_password, None)?)
+                Some(read_password_confirmed(
+                    hidden_password,
+                    "Hidden password: ",
+                    "Confirm hidden password: ",
+                )?)
             } else {
                 None
             };
@@ -248,15 +347,27 @@ fn run() -> Result<()> {
                         )?;
                         format_volume(Arc::new(Mutex::new(hvol)), fs_ty)?;
                     }
-                    println!("created DC01 container {} (fs={fs})", path.display());
+                    println!(
+                        "created DC01 container {} (size={}, fs={fs})",
+                        path.display(),
+                        format_bytes(size)
+                    );
                 } else {
-                    println!("created DC01 container {} (fs=none)", path.display());
+                    println!(
+                        "created DC01 container {} (size={}, fs=none)",
+                        path.display(),
+                        format_bytes(size)
+                    );
                 }
             }
             #[cfg(not(target_os = "linux"))]
             {
                 let _ = fs_ty;
-                println!("created DC01 container {}", path.display());
+                println!(
+                    "created DC01 container {} (size={})",
+                    path.display(),
+                    format_bytes(size)
+                );
             }
         }
         Commands::Mount {
@@ -271,9 +382,9 @@ fn run() -> Result<()> {
             protect_hidden,
             hidden_password,
         } => {
-            let pw = read_password(password, password_env)?;
+            let pw = read_password(password, password_env, "Password: ")?;
             let hp = if protect_hidden {
-                Some(read_password(hidden_password, None)?)
+                Some(read_password(hidden_password, None, "Hidden password: ")?)
             } else {
                 None
             };
@@ -342,7 +453,7 @@ fn run() -> Result<()> {
             keyfile,
             pim,
         } => {
-            let pw = read_password(password, password_env)?;
+            let pw = read_password(password, password_env, "Password: ")?;
             let kfs = load_keyfiles(&keyfile)?;
             let kf_refs: Vec<&[u8]> = kfs.iter().map(|v| v.as_slice()).collect();
             let vol = open_container(
@@ -355,13 +466,69 @@ fn run() -> Result<()> {
                     hidden_password: None,
                 },
             )?;
-            println!("kind: {:?}", vol.kind);
-            println!("sector_size: {}", vol.sector_size);
-            println!("data_offset: {}", vol.data_offset);
-            println!("data_length: {}", vol.data_length);
-            println!("hidden: {}", vol.is_hidden);
+            println!("path:          {}", path.display());
+            println!("kind:          {:?}", vol.kind);
+            println!("sector_size:   {}", vol.sector_size);
+            println!("data_offset:   {}", vol.data_offset);
+            println!(
+                "data_length:   {} ({})",
+                vol.data_length,
+                format_bytes(vol.data_length)
+            );
+            println!("hidden:        {}", vol.is_hidden);
             dismount_session(vol);
         }
+        Commands::Chpasswd {
+            path,
+            password,
+            password_env,
+            new_password,
+            keyfile,
+            new_keyfile,
+        } => {
+            let old = read_password(password, password_env, "Current password: ")?;
+            let new =
+                read_password_confirmed(new_password, "New password: ", "Confirm new password: ")?;
+            let kfs = load_keyfiles(&keyfile)?;
+            let kf_refs: Vec<&[u8]> = kfs.iter().map(|v| v.as_slice()).collect();
+            let new_kfs = if new_keyfile.is_empty() {
+                kfs.clone()
+            } else {
+                load_keyfiles(&new_keyfile)?
+            };
+            let new_kf_refs: Vec<&[u8]> = new_kfs.iter().map(|v| v.as_slice()).collect();
+            change_password(
+                &path,
+                &OpenOptions {
+                    password: old.as_bytes(),
+                    keyfiles: &kf_refs,
+                    pim: 0,
+                    protect_hidden: false,
+                    hidden_password: None,
+                },
+                new.as_bytes(),
+                &new_kf_refs,
+            )?;
+            println!("password updated for {}", path.display());
+            println!("tip: old password no longer unlocks this volume");
+        }
+        Commands::Header { cmd } => match cmd {
+            HeaderCmd::Backup { container, outfile } => {
+                backup_headers(&container, &outfile)?;
+                println!(
+                    "wrote header backup {} (primary+hidden slots)",
+                    outfile.display()
+                );
+            }
+            HeaderCmd::Restore { container, infile } => {
+                restore_headers(&container, &infile)?;
+                println!(
+                    "restored headers into {} from {}",
+                    container.display(),
+                    infile.display()
+                );
+            }
+        },
         Commands::Status => {
             #[cfg(target_os = "linux")]
             {
@@ -370,11 +537,16 @@ fn run() -> Result<()> {
                 if mounts.is_empty() {
                     println!("(no mounts)");
                 } else {
+                    println!(
+                        "{:<12} {:<14} {:<8} CONTAINER → MOUNTPOINT",
+                        "ID", "BACKEND", "FS"
+                    );
                     for st in mounts {
                         println!(
-                            "{}\t{}\t{}\t{}",
+                            "{:<12} {:<14} {:<8} {} → {}",
                             st.id,
                             st.backend,
+                            st.fs,
                             st.container.display(),
                             st.mountpoint.display()
                         );
@@ -462,4 +634,17 @@ fn run() -> Result<()> {
         },
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_size;
+
+    #[test]
+    fn parse_human_sizes() {
+        assert_eq!(parse_size("16").unwrap(), 16);
+        assert_eq!(parse_size("16M").unwrap(), 16 * 1024 * 1024);
+        assert_eq!(parse_size("1g").unwrap(), 1024 * 1024 * 1024);
+        assert_eq!(parse_size("512K").unwrap(), 512 * 1024);
+    }
 }
