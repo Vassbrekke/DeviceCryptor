@@ -14,3 +14,9 @@ name = "header_parse"
 path = "fuzz_targets/header_parse.rs"
 test = false
 doc = false
+
+[[bin]]
+name = "sector_xts"
+path = "fuzz_targets/sector_xts.rs"
+test = false
+doc = false

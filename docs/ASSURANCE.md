@@ -13,10 +13,10 @@ DeviceCryptor is an experimental encrypted-container implementation. Using revie
 | Layer | What runs | Limits |
 |-------|-----------|--------|
 | Primitive crates | `aes`/`xts-mode`, `argon2`, `ml-kem`, `blake3`, OS RNG via `getrandom` | Composition and format parsing are ours |
-| Unit tests | AES-XTS roundtrip, Argon2id PIM table vs VeraCrypt constants, DC01 create/open/wrong-password, ML-KEM wrap roundtrip, `chpasswd`/header backup | Roundtrips, not NIST/RFC test vectors for AES-XTS or ML-KEM |
-| Linux e2e | `scripts/linux-test.sh` — create, mount, persist, wrong password, hidden volume, header backup/restore | FAT checkout path only; no injected corruption campaign |
-| Fuzz | `fuzz/fuzz_targets/header_parse.rs` — DC01 + VeraCrypt header parse with a fixed password | No coverage of sector I/O, KDF, wrap, or mount; not in CI |
-| CI | `fmt`, `clippy -D warnings`, unit tests, linux e2e, `cargo audit` | No fuzz job, no golden VeraCrypt volumes in-tree |
+| Unit tests | AES-XTS vs Python `cryptography`; ML-KEM-768 vs NIST ACVP; vendor VeraCrypt samples for SHA-512, SHA-256, BLAKE2s, Whirlpool, and Streebog/Kuznyechik | Cascades still absent |
+| Linux e2e | `scripts/linux-test.sh` — create, mount, persist, wrong password, hidden volume, header backup/restore | FAT checkout path; live FUSE is a separate opt-in |
+| Fuzz | `header_parse` (pays a full KDF; not for CI) and `sector_xts` (no KDF) | Not in CI; no crash policy |
+| CI | `fmt`, `clippy -D warnings`, unit tests, linux e2e, `cargo audit` | No fuzz job |
 
 How to run the current tests: [TESTING.md](TESTING.md).
 

@@ -22,6 +22,7 @@ fuzz_target!(|data: &[u8]| {
             password: pw,
             keyfiles: &[],
             pim: 0,
+            prf: None,
         },
     );
 });

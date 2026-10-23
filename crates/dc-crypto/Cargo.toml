@@ -11,6 +11,12 @@ aes = { workspace = true }
 xts-mode = { workspace = true }
 argon2 = { workspace = true }
 blake3 = { workspace = true }
+blake2 = { workspace = true }
+whirlpool = { workspace = true }
+streebog = { workspace = true }
+kuznyechik = { workspace = true }
+twofish = { workspace = true }
+camellia = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
 pbkdf2 = { workspace = true }
@@ -28,3 +34,4 @@ hex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+serde_json = { workspace = true }

@@ -1,0 +1,106 @@
+.TH DC 1 "DeviceCryptor" "Vassbrekke AS" "User commands"
+.SH NAME
+dc \- DeviceCryptor encrypted containers
+.SH SYNOPSIS
+.B dc
+.RI [ command ]
+.RI [ options ]
+.SH DESCRIPTION
+.B dc
+creates and mounts experimental encrypted file containers.
+The native format is DC01 (AES-256-XTS, Argon2id, BLAKE3 header MAC).
+Some VeraCrypt/TrueCrypt volumes can be mounted on the AES-XTS path.
+This is not a VeraCrypt replacement and is not independently audited.
+Do not store irreplaceable data in these volumes.
+.PP
+Omit
+.B --password
+to type it silently. Prefer
+.B --password-env
+over
+.B --password
+so the secret is not visible in the process list.
+.SH COMMANDS
+.TP
+.B create
+.I path
+.RB [ --size
+.IR SIZE ]
+.RB [ --fs
+fat32|ext4|none]
+.RB [ --wipe ]
+Create a DC01 container.
+.I SIZE
+accepts bytes or a human suffix:
+.BR 16M ,
+.BR 1G ,
+.BR 512K .
+.B --wipe
+fills the file with random data and prints a progress meter on stderr.
+.TP
+.B mount
+.I path
+.I mountpoint
+Mount a volume. On Linux, FAT volumes use an unprivileged checkout by default.
+.B --live
+mounts FAT through FUSE so edits write through. That command stays running.
+Dismount does not ask for the password again.
+.RB [ --prf
+auto|sha512|sha256|blake2s|whirlpool|streebog|argon2]
+selects the VeraCrypt PKCS-5 PRF. auto tries Argon2id, then HMAC-SHA-512, HMAC-SHA-256, HMAC-BLAKE2s, HMAC-Whirlpool, and HMAC-Streebog.
+.TP
+.B dismount
+.RB [ --id
+.IR ID ]
+Sync changes back and forget the mount session.
+.TP
+.B chpasswd
+.I path
+Change a DC01 password without re-encrypting volume data.
+.TP
+.B header backup
+.I container
+.I outfile
+.TP
+.B header restore
+.I container
+.I infile
+.TP
+.B status
+List active mounts.
+.TP
+.B info
+.I path
+Show unlocked volume metadata, including the disk cipher.
+.TP
+.B bench
+.RB [ --pim
+.IR N ]
+Time DC01 Argon2id defaults. With
+.BR --pim ,
+also time VeraCrypt's Argon2id mapping (0 means default PIM 12 and can be slow).
+.TP
+.B keyfile
+.I path
+.RB [ --bytes
+.IR N ]
+Write a random keyfile, mode 0600. Default length is 64 bytes.
+.TP
+.B favorite
+list | add | remove
+.TP
+.B keywrap
+gen | wrap | unwrap
+ML-KEM-768 key-export wrap. Not a disk cipher.
+.SH FILES
+.TP
+.I ~/.local/state/devicecryptor/
+Mount metadata. The unlocked master key is stored in the user kernel keyring when
+.B keyctl
+can round-trip it; otherwise it is a mode-0600 session file, wiped on dismount.
+.SH SEE ALSO
+.B devicecryptor
+(graphical window, classic layout)
+.SH CAVEATS
+Experimental. Not independently audited. Twofish, Camellia, and AES-Twofish are implemented. Serpent and other cascades are not.
+System encryption is not ready.

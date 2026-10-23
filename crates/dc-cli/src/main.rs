@@ -6,14 +6,18 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
-use dc_crypto::{mlkem_decapsulate_key, mlkem_encapsulate_key, mlkem_generate_keypair, WrappedKey};
+use dc_crypto::{
+    bench_argon2id, bench_veracrypt_pim, fill_random, mlkem_decapsulate_key, mlkem_encapsulate_key,
+    mlkem_generate_keypair, PrfId, WrappedKey,
+};
 use dc_format::dc01::{DC01_DEFAULT_MEM_KIB, DC01_DEFAULT_PARALLELISM, DC01_DEFAULT_TIME};
 use dc_volume::{
     add_favorite, backup_headers, change_password, create_container, create_container_with_hidden,
-    dismount_session, list_favorites, open_container, remove_favorite, restore_headers,
-    CreateOptions, Favorite, FsType, OpenOptions,
+    create_container_with_hidden_progress, create_container_with_progress, dismount_session,
+    list_favorites, open_container, remove_favorite, restore_headers, CreateOptions, Favorite,
+    FsType, OpenOptions,
 };
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 #[cfg(target_os = "linux")]
 use dc_volume::{format_volume, linux_dismount, linux_mount, load_mount_state, LinuxMountOptions};
@@ -66,6 +70,9 @@ enum Commands {
         keyfile: Vec<PathBuf>,
         #[arg(long, default_value_t = 0)]
         pim: i32,
+        /// VeraCrypt PKCS-5 PRF: auto, sha512, sha256, blake2s, whirlpool, streebog, argon2
+        #[arg(long, default_value = "auto")]
+        prf: String,
         #[arg(long, default_value = "default")]
         id: String,
         #[arg(long, default_value = "auto")]
@@ -75,8 +82,10 @@ enum Commands {
         protect_hidden: bool,
         #[arg(long)]
         hidden_password: Option<String>,
+        /// Live FUSE mount. Edits write through. This command stays running.
+        #[arg(long, default_value_t = false)]
+        live: bool,
     },
-    /// Dismount and sync changes back into the container (no password — session from mount)
     Dismount {
         /// Mount id from `dc mount --id …` (default: "default")
         #[arg(long, default_value = "default")]
@@ -93,6 +102,9 @@ enum Commands {
         keyfile: Vec<PathBuf>,
         #[arg(long, default_value_t = 0)]
         pim: i32,
+        /// VeraCrypt PKCS-5 PRF: auto, sha512, sha256, blake2s, whirlpool, streebog, argon2
+        #[arg(long, default_value = "auto")]
+        prf: String,
     },
     /// Change volume password (DC01; keeps master key / ciphertext)
     Chpasswd {
@@ -126,6 +138,21 @@ enum Commands {
         #[command(subcommand)]
         cmd: KeywrapCmd,
     },
+    /// Time Argon2id for DC01 defaults, or a VeraCrypt PIM (`--pim`)
+    Bench {
+        /// VeraCrypt PIM to time (0 = default PIM 12). Omit to time DC01 defaults only.
+        #[arg(long)]
+        pim: Option<i32>,
+    },
+    /// Write a random keyfile (mode 0600). VeraCrypt-style keyfile generator.
+    Keyfile {
+        path: PathBuf,
+        /// Length in bytes (1..=1048576)
+        #[arg(long, default_value_t = 64)]
+        bytes: u32,
+    },
+    /// Print the mount backends this build supports.
+    Platforms,
 }
 
 #[derive(Subcommand, Debug)]
@@ -267,6 +294,52 @@ fn load_keyfiles(paths: &[PathBuf]) -> Result<Vec<Vec<u8>>> {
     Ok(out)
 }
 
+fn parse_prf(s: &str) -> Result<Option<PrfId>> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "" | "auto" => Ok(None),
+        "sha512" | "hmac-sha512" | "hmac-sha-512" => Ok(Some(PrfId::Sha512)),
+        "sha256" | "hmac-sha256" | "hmac-sha-256" => Ok(Some(PrfId::Sha256)),
+        "blake2s" | "hmac-blake2s" => Ok(Some(PrfId::Blake2s)),
+        "whirlpool" | "hmac-whirlpool" => Ok(Some(PrfId::Whirlpool)),
+        "streebog" | "hmac-streebog" => Ok(Some(PrfId::Streebog)),
+        "argon2" | "argon2id" => Ok(Some(PrfId::Argon2id)),
+        other => bail!(
+            "unknown --prf {other} (auto, sha512, sha256, blake2s, whirlpool, streebog, argon2)"
+        ),
+    }
+}
+
+fn write_keyfile(path: &std::path::Path, bytes: u32) -> Result<()> {
+    if bytes == 0 || bytes > 1024 * 1024 {
+        bail!("--bytes must be 1..=1048576");
+    }
+    let mut buf = vec![0u8; bytes as usize];
+    fill_random(&mut buf).map_err(|e| anyhow::anyhow!("rng: {e}"))?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(&buf)?;
+        f.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, &buf)?;
+    }
+    buf.zeroize();
+    Ok(())
+}
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -313,7 +386,33 @@ fn run() -> Result<()> {
             } else {
                 None
             };
-            if let Some(hs) = hidden_size {
+            if wipe {
+                let mut last_pct = 0u64;
+                let mut report = |done: u64, total: u64| {
+                    let pct = done.saturating_mul(100).checked_div(total).unwrap_or(100);
+                    if pct == 100 || pct >= last_pct + 5 {
+                        last_pct = pct;
+                        eprint!(
+                            "\rwiping {pct:>3}%  {}/{}",
+                            format_bytes(done),
+                            format_bytes(total)
+                        );
+                        let _ = io::stderr().flush();
+                    }
+                };
+                if let Some(hs) = hidden_size {
+                    create_container_with_hidden_progress(
+                        &path,
+                        &opts,
+                        hp.as_ref().unwrap().as_bytes(),
+                        hs,
+                        &mut report,
+                    )?;
+                } else {
+                    create_container_with_progress(&path, &opts, &mut report)?;
+                }
+                eprintln!();
+            } else if let Some(hs) = hidden_size {
                 create_container_with_hidden(&path, &opts, hp.as_ref().unwrap().as_bytes(), hs)?;
             } else {
                 create_container(&path, &opts)?;
@@ -329,6 +428,7 @@ fn run() -> Result<()> {
                             password: pw.as_bytes(),
                             keyfiles: &kf_refs,
                             pim: 0,
+                            prf: None,
                             protect_hidden: false,
                             hidden_password: None,
                         },
@@ -341,6 +441,7 @@ fn run() -> Result<()> {
                                 password: hidden_pw.as_bytes(),
                                 keyfiles: &kf_refs,
                                 pim: 0,
+                                prf: None,
                                 protect_hidden: false,
                                 hidden_password: None,
                             },
@@ -377,12 +478,15 @@ fn run() -> Result<()> {
             password_env,
             keyfile,
             pim,
+            prf,
             id,
             fs,
             protect_hidden,
             hidden_password,
+            live,
         } => {
             let pw = read_password(password, password_env, "Password: ")?;
+            let prf = parse_prf(&prf)?;
             let hp = if protect_hidden {
                 Some(read_password(hidden_password, None, "Hidden password: ")?)
             } else {
@@ -401,6 +505,7 @@ fn run() -> Result<()> {
                     password: pw.as_bytes(),
                     keyfiles: &kf_refs,
                     pim,
+                    prf,
                     protect_hidden,
                     hidden_password: hp.as_ref().map(|s| s.as_bytes()),
                 };
@@ -411,16 +516,33 @@ fn run() -> Result<()> {
                         mountpoint: &mountpoint,
                         open,
                         fs_hint,
+                        live,
                     },
                 )?;
                 println!(
-                    "mounted {} → {} (backend={}, id={})",
+                    "mounted {} → {} (backend={}, encryption={}, id={})",
                     path.display(),
                     mountpoint.display(),
                     st.backend,
+                    if st.cipher.is_empty() {
+                        "unknown"
+                    } else {
+                        st.cipher.as_str()
+                    },
                     st.id
                 );
-                if st.backend == "fat-checkout" {
+                if st.backend == "fat-fuse" {
+                    println!(
+                        "live mount — edits write through. Leave this running. `dc dismount --id {id}` from another terminal unmounts it."
+                    );
+                    loop {
+                        let text = std::fs::read_to_string("/proc/mounts").unwrap_or_default();
+                        if !text.contains(&mountpoint.display().to_string()) {
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                    }
+                } else if st.backend == "fat-checkout" {
                     println!(
                         "note: checkout mount — edit files in the mountpoint, then `dc dismount --id {id}` to sync (no password)"
                     );
@@ -428,7 +550,7 @@ fn run() -> Result<()> {
             }
             #[cfg(not(target_os = "linux"))]
             {
-                let _ = (mountpoint, pim, id, fs, protect_hidden, hp, kf_refs);
+                let _ = (mountpoint, pim, prf, id, fs, protect_hidden, hp, kf_refs);
                 bail!("mount is implemented for Linux first; Windows mount uses the filter driver");
             }
         }
@@ -452,8 +574,10 @@ fn run() -> Result<()> {
             password_env,
             keyfile,
             pim,
+            prf,
         } => {
             let pw = read_password(password, password_env, "Password: ")?;
+            let prf = parse_prf(&prf)?;
             let kfs = load_keyfiles(&keyfile)?;
             let kf_refs: Vec<&[u8]> = kfs.iter().map(|v| v.as_slice()).collect();
             let vol = open_container(
@@ -462,6 +586,7 @@ fn run() -> Result<()> {
                     password: pw.as_bytes(),
                     keyfiles: &kf_refs,
                     pim,
+                    prf,
                     protect_hidden: false,
                     hidden_password: None,
                 },
@@ -476,6 +601,7 @@ fn run() -> Result<()> {
                 format_bytes(vol.data_length)
             );
             println!("hidden:        {}", vol.is_hidden);
+            println!("encryption:    {}", vol.cipher.label());
             dismount_session(vol);
         }
         Commands::Chpasswd {
@@ -503,6 +629,7 @@ fn run() -> Result<()> {
                     password: old.as_bytes(),
                     keyfiles: &kf_refs,
                     pim: 0,
+                    prf: None,
                     protect_hidden: false,
                     hidden_password: None,
                 },
@@ -632,6 +759,41 @@ fn run() -> Result<()> {
                 fs::write(outfile, pt.as_slice())?;
             }
         },
+        Commands::Bench { pim } => {
+            let dc = bench_argon2id(
+                "dc01",
+                DC01_DEFAULT_TIME,
+                DC01_DEFAULT_MEM_KIB,
+                DC01_DEFAULT_PARALLELISM,
+            )?;
+            println!(
+                "DC01 Argon2id  t={} m={} KiB p={}  {} ms",
+                dc.time_cost, dc.memory_kib, dc.parallelism, dc.elapsed_ms
+            );
+            if let Some(pim) = pim {
+                let b = bench_veracrypt_pim(pim)?;
+                println!(
+                    "VeraCrypt Argon2id PIM {pim}  t={} m={} KiB p={}  {} ms",
+                    b.time_cost, b.memory_kib, b.parallelism, b.elapsed_ms
+                );
+                if pim == 0 {
+                    println!("(PIM 0 uses VeraCrypt default PIM 12)");
+                }
+            } else {
+                println!(
+                    "pass --pim N to time a VeraCrypt Argon2id PIM (0 = default PIM 12; can be slow)"
+                );
+            }
+        }
+        Commands::Keyfile { path, bytes } => {
+            write_keyfile(&path, bytes)?;
+            println!("wrote keyfile {} ({} bytes)", path.display(), bytes);
+        }
+        Commands::Platforms => {
+            for line in dc_platform::platform_report() {
+                println!("{line}");
+            }
+        }
     }
     Ok(())
 }

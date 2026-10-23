@@ -2,7 +2,7 @@ use std::fs::{File, OpenOptions as FsOpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-use dc_crypto::{fill_random, Aes256Xts, SecureBytes};
+use dc_crypto::{fill_random, Aes256Xts, DiskXts, SecureBytes, VolumeCipher};
 use dc_format::dc01::{
     create_dc01_header, create_dc01_header_at, open_dc01_header, Dc01OpenOptions,
     DC01_DEFAULT_MEM_KIB, DC01_DEFAULT_PARALLELISM, DC01_DEFAULT_TIME,
@@ -55,6 +55,8 @@ pub struct OpenOptions<'a> {
     pub password: &'a [u8],
     pub keyfiles: &'a [&'a [u8]],
     pub pim: i32,
+    /// VeraCrypt PKCS-5 PRF. `None` tries Argon2id, HMAC-SHA-512, then HMAC-SHA-256.
+    pub prf: Option<dc_crypto::PrfId>,
     pub protect_hidden: bool,
     pub hidden_password: Option<&'a [u8]>,
 }
@@ -68,8 +70,9 @@ pub struct MountedVolume {
     pub is_hidden: bool,
     /// Outer volume's hidden region size when protect_hidden is active.
     pub hidden_protect_size: u64,
+    pub cipher: VolumeCipher,
     pub(crate) file: File,
-    xts: Aes256Xts,
+    xts: DiskXts,
     #[allow(dead_code)]
     master: SecureBytes,
 }
@@ -77,6 +80,19 @@ pub struct MountedVolume {
 impl MountedVolume {
     pub fn sync(&mut self) -> std::io::Result<()> {
         self.file.sync_all()
+    }
+
+    /// XTS data-unit number for a sector inside the decrypted data area.
+    ///
+    /// VeraCrypt uses the host-file sector (`offset / sector_size`). DC01 uses
+    /// the sector index within the data area, which is how these volumes are written.
+    fn data_unit(&self, data_sector: u64) -> u64 {
+        match self.kind {
+            VolumeKind::VeraCrypt => {
+                self.data_offset / u64::from(self.sector_size.max(1)) + data_sector
+            }
+            VolumeKind::Dc01 => data_sector,
+        }
     }
 }
 
@@ -88,6 +104,17 @@ impl Drop for MountedVolume {
 }
 
 pub fn create_container(path: &Path, opts: &CreateOptions<'_>) -> Result<(), VolumeError> {
+    create_container_with_progress(path, opts, &mut |_, _| {})
+}
+
+/// Create a container, reporting wipe progress as `(bytes_written, total_size)`.
+///
+/// Sparse creates report a single `(size, size)` tick. Random wipes report after each chunk.
+pub fn create_container_with_progress(
+    path: &Path,
+    opts: &CreateOptions<'_>,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<(), VolumeError> {
     if opts.size < DATA_OFFSET + opts.sector_size as u64 + HEADER_SLOT_SIZE * 2 {
         return Err(VolumeError::Invalid("size too small"));
     }
@@ -119,6 +146,7 @@ pub fn create_container(path: &Path, opts: &CreateOptions<'_>) -> Result<(), Vol
         file.seek(SeekFrom::Start(opts.size.saturating_sub(1)))?;
         file.write_all(&[0])?;
         file.seek(SeekFrom::Start(0))?;
+        progress(opts.size, opts.size);
     } else {
         let mut chunk = vec![0u8; 1024 * 1024];
         let mut written = 0u64;
@@ -127,6 +155,7 @@ pub fn create_container(path: &Path, opts: &CreateOptions<'_>) -> Result<(), Vol
             let n = ((opts.size - written) as usize).min(chunk.len());
             file.write_all(&chunk[..n])?;
             written += n as u64;
+            progress(written, opts.size);
         }
         file.seek(SeekFrom::Start(0))?;
     }
@@ -182,7 +211,18 @@ pub fn create_container_with_hidden(
     hidden_password: &[u8],
     hidden_size: u64,
 ) -> Result<(), VolumeError> {
-    create_container(path, outer)?;
+    create_container_with_hidden_progress(path, outer, hidden_password, hidden_size, &mut |_, _| {})
+}
+
+/// Same as [`create_container_with_hidden`], forwarding wipe progress from the outer create.
+pub fn create_container_with_hidden_progress(
+    path: &Path,
+    outer: &CreateOptions<'_>,
+    hidden_password: &[u8],
+    hidden_size: u64,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<(), VolumeError> {
+    create_container_with_progress(path, outer, progress)?;
     let data_size = outer.size - DATA_OFFSET - HEADER_SLOT_SIZE * 2;
     if hidden_size == 0 || hidden_size >= data_size {
         return Err(VolumeError::Invalid("hidden volume too large"));
@@ -228,8 +268,10 @@ pub fn open_container(path: &Path, opts: &OpenOptions<'_>) -> Result<MountedVolu
     };
 
     if let Ok(h) = open_dc01_header(&header, &dc_opts) {
-        let xts = Aes256Xts::new(h.master_key.as_slice())
-            .map_err(|e| VolumeError::Crypto(e.to_string()))?;
+        let xts = DiskXts::Aes(Box::new(
+            Aes256Xts::new(h.master_key.as_slice())
+                .map_err(|e| VolumeError::Crypto(e.to_string()))?,
+        ));
         return Ok(MountedVolume {
             path: path.to_path_buf(),
             kind: VolumeKind::Dc01,
@@ -238,6 +280,7 @@ pub fn open_container(path: &Path, opts: &OpenOptions<'_>) -> Result<MountedVolu
             data_length: h.encrypted_area_length,
             is_hidden: (h.flags & 1) != 0,
             hidden_protect_size: 0,
+            cipher: VolumeCipher::Aes256,
             file,
             xts,
             master: h.master_key,
@@ -248,13 +291,15 @@ pub fn open_container(path: &Path, opts: &OpenOptions<'_>) -> Result<MountedVolu
         password: opts.password,
         keyfiles: opts.keyfiles,
         pim: opts.pim,
+        prf: opts.prf,
     };
     if let Ok(h) = try_open_veracrypt_header(&header, &vc_opts) {
-        let key = &h.master_keys.as_slice()[..64.min(h.master_keys.len())];
-        let mut key64 = SecureBytes::new(64);
-        key64.as_mut_slice().copy_from_slice(key);
-        let xts =
-            Aes256Xts::new(key64.as_slice()).map_err(|e| VolumeError::Crypto(e.to_string()))?;
+        let n = h.cipher.xts_key_len();
+        let key = &h.master_keys.as_slice()[..n.min(h.master_keys.len())];
+        let mut key_bytes = SecureBytes::new(n);
+        key_bytes.as_mut_slice().copy_from_slice(key);
+        let xts = DiskXts::open(h.cipher, key_bytes.as_slice())
+            .map_err(|e| VolumeError::Crypto(e.to_string()))?;
         let sector = if h.sector_size == 0 {
             512
         } else {
@@ -276,13 +321,53 @@ pub fn open_container(path: &Path, opts: &OpenOptions<'_>) -> Result<MountedVolu
             },
             is_hidden: h.hidden_volume_size != 0,
             hidden_protect_size: 0,
+            cipher: h.cipher,
             file,
             xts,
-            master: key64,
+            master: key_bytes,
         });
     }
 
-    // Hidden volume header (distinct password)
+    // Hidden VeraCrypt header sits at 64 KiB. The outer header does not name it.
+    file.seek(SeekFrom::Start(HIDDEN_HEADER_OFFSET))?;
+    if file.read_exact(&mut header).is_ok() {
+        if let Ok(h) = try_open_veracrypt_header(&header, &vc_opts) {
+            let n = h.cipher.xts_key_len();
+            let key = &h.master_keys.as_slice()[..n.min(h.master_keys.len())];
+            let mut key_bytes = SecureBytes::new(n);
+            key_bytes.as_mut_slice().copy_from_slice(key);
+            let xts = DiskXts::open(h.cipher, key_bytes.as_slice())
+                .map_err(|e| VolumeError::Crypto(e.to_string()))?;
+            let sector = if h.sector_size == 0 {
+                512
+            } else {
+                h.sector_size
+            };
+            return Ok(MountedVolume {
+                path: path.to_path_buf(),
+                kind: VolumeKind::VeraCrypt,
+                sector_size: sector,
+                data_offset: if h.encrypted_area_start != 0 {
+                    h.encrypted_area_start
+                } else {
+                    VC_DATA_OFFSET_FALLBACK
+                },
+                data_length: if h.encrypted_area_length != 0 {
+                    h.encrypted_area_length
+                } else {
+                    h.volume_size
+                },
+                is_hidden: true,
+                hidden_protect_size: 0,
+                cipher: h.cipher,
+                file,
+                xts,
+                master: key_bytes,
+            });
+        }
+    }
+
+    // Hidden DC01 header (distinct password)
     if let Ok(vol) = try_open_at(path, HIDDEN_HEADER_OFFSET, opts, true) {
         return Ok(vol);
     }
@@ -309,8 +394,9 @@ fn try_open_at(
         keyfiles: opts.keyfiles,
     };
     let h = open_dc01_header(&header, &dc_opts).map_err(|_| VolumeError::Auth)?;
-    let xts =
-        Aes256Xts::new(h.master_key.as_slice()).map_err(|e| VolumeError::Crypto(e.to_string()))?;
+    let xts = DiskXts::Aes(Box::new(
+        Aes256Xts::new(h.master_key.as_slice()).map_err(|e| VolumeError::Crypto(e.to_string()))?,
+    ));
     Ok(MountedVolume {
         path: path.to_path_buf(),
         kind: VolumeKind::Dc01,
@@ -319,6 +405,7 @@ fn try_open_at(
         data_length: h.encrypted_area_length,
         is_hidden,
         hidden_protect_size: 0,
+        cipher: VolumeCipher::Aes256,
         file,
         xts,
         master: h.master_key,
@@ -342,7 +429,7 @@ pub fn read_sectors(
         let start = (i as usize) * vol.sector_size as usize;
         let end = start + vol.sector_size as usize;
         vol.xts
-            .decrypt_sector(start_sector + i, &mut buf[start..end])
+            .decrypt_sector(vol.data_unit(start_sector + i), &mut buf[start..end])
             .map_err(|e| VolumeError::Crypto(e.to_string()))?;
     }
     Ok(())
@@ -363,7 +450,7 @@ pub fn write_sectors(
         let start = (i as usize) * vol.sector_size as usize;
         let end = start + vol.sector_size as usize;
         vol.xts
-            .encrypt_sector(start_sector + i, &mut tmp[start..end])
+            .encrypt_sector(vol.data_unit(start_sector + i), &mut tmp[start..end])
             .map_err(|e| VolumeError::Crypto(e.to_string()))?;
     }
     let offset = vol.data_offset + start_sector * ss;
@@ -395,7 +482,9 @@ pub fn open_with_master_key(
         return Err(VolumeError::Invalid("invalid sector size"));
     }
     let file = FsOpenOptions::new().read(true).write(true).open(path)?;
-    let xts = Aes256Xts::new(master_key).map_err(|e| VolumeError::Crypto(e.to_string()))?;
+    let xts = DiskXts::Aes(Box::new(
+        Aes256Xts::new(master_key).map_err(|e| VolumeError::Crypto(e.to_string()))?,
+    ));
     Ok(MountedVolume {
         path: path.to_path_buf(),
         kind,
@@ -404,6 +493,7 @@ pub fn open_with_master_key(
         data_length,
         is_hidden,
         hidden_protect_size: 0,
+        cipher: VolumeCipher::Aes256,
         file,
         xts,
         master: SecureBytes::from_slice(master_key),
@@ -440,6 +530,7 @@ mod tests {
                 password: b"test-password-ok",
                 keyfiles: &[],
                 pim: 0,
+                prf: None,
                 protect_hidden: false,
                 hidden_password: None,
             },
@@ -452,5 +543,69 @@ mod tests {
         read_sectors(&mut vol, 0, &mut out).unwrap();
         assert_eq!(&out[0..4], b"DC!!");
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn wipe_reports_progress_to_total() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wipe.dc");
+        let size = 2 * 1024 * 1024;
+        let opts = CreateOptions {
+            password: b"test-password-ok",
+            size,
+            sparse: false,
+            ..CreateOptions::default()
+        };
+        let mut ticks = 0u32;
+        let mut last = 0u64;
+        create_container_with_progress(&path, &opts, &mut |done, total| {
+            ticks += 1;
+            last = done;
+            assert_eq!(total, size);
+            assert!(done <= total);
+        })
+        .unwrap();
+        assert!(ticks >= 2);
+        assert_eq!(last, size);
+    }
+
+    #[test]
+    fn vendor_sha512_volume_boot_sector() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendor/VeraCrypt/Tests/test.sha512.hc");
+        let mut vol = open_container(
+            &path,
+            &OpenOptions {
+                password: b"test",
+                keyfiles: &[],
+                pim: 0,
+                prf: Some(dc_crypto::PrfId::Sha512),
+                protect_hidden: false,
+                hidden_password: None,
+            },
+        )
+        .unwrap();
+        assert!(matches!(vol.kind, VolumeKind::VeraCrypt));
+        assert!(!vol.is_hidden);
+        let mut sector = vec![0u8; vol.sector_size as usize];
+        read_sectors(&mut vol, 0, &mut sector).unwrap();
+        assert_eq!(&sector[510..512], &[0x55, 0xAA]);
+
+        let mut hidden = open_container(
+            &path,
+            &OpenOptions {
+                password: b"testhidden",
+                keyfiles: &[],
+                pim: 0,
+                prf: Some(dc_crypto::PrfId::Sha512),
+                protect_hidden: false,
+                hidden_password: None,
+            },
+        )
+        .unwrap();
+        assert!(hidden.is_hidden);
+        let mut hsector = vec![0u8; hidden.sector_size as usize];
+        read_sectors(&mut hidden, 0, &mut hsector).unwrap();
+        assert_eq!(&hsector[510..512], &[0x55, 0xAA]);
     }
 }

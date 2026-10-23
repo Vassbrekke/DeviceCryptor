@@ -18,12 +18,20 @@ actively exploitable crypto bugs before a fix is available.
 
 ## Mount session keys (Linux checkout)
 
-While a volume is mounted, the unlocked master key is stored under
-`~/.local/state/devicecryptor/<id>.session` with mode `0600` so **dismount does not
-require re-entering the password** (standard VeraCrypt-like UX). The file is
-overwritten and removed on dismount. Anyone who can read that path while a volume
+While a volume is mounted, the unlocked master key is needed so **dismount does not
+require re-entering the password**.
+
+1. If `keyctl` can store the blob on stdin (`padd`) and read it back, the key lives
+   in the user kernel keyring (`devicecryptor-session-<id>`). The on-disk file is
+   only an 8-byte marker (`DCSESSKR`), mode `0600`. The key is never passed on argv.
+2. Otherwise the full session blob is written to
+   `~/.local/state/devicecryptor/<id>.session` (mode `0600`).
+
+Either store is wiped on dismount. A keyring entry also dies at logout if a crash
+skips the wipe. Anyone who can read the user keyring or that path while a volume
 is mounted can decrypt the container data area — protect the user account the same
-way you would any unlocked volume.
+way you would any unlocked volume. Mount ids with spaces or path characters skip
+the keyring and use the file.
 
 ## Password change
 

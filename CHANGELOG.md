@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- Classic main window (slot list, Volume field, Select File, Mount / Dismount / Create Volume). Password, creation, header backup/restore, and password change are dialogs. ML-KEM wrap and Argon2id benchmark stay under Tools.
+- `dc bench` times DC01 Argon2id defaults; `--pim` times the VeraCrypt PIM mapping
+- `dc keyfile` writes a random keyfile (mode 0600)
+- `--wipe` prints a stderr progress meter
+- Mount session keys prefer the user kernel keyring (`keyctl padd` on stdin) and fall back to the mode-0600 session file
+- A wrong DC01 password no longer tries VeraCrypt's 416 MiB Argon2id. That mapping belongs to VeraCrypt headers only.
+- A VeraCrypt 1.26.29 AES-Twofish volume opens. Encrypt order is Twofish-XTS, then AES-XTS. The header key is 128 bytes.
+- `scripts/install-linux.sh` installs `dc`, `devicecryptor`, a man page, and a desktop launcher
+
 ### Changed
 
 - Public wording matches assurance: experimental unaudited containers with optional ML-KEM-768 **key wrap**, not a “post-quantum-ready VeraCrypt rewrite”

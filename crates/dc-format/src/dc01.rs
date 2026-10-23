@@ -213,8 +213,9 @@ pub fn open_dc01_header(
     payload.copy_from_slice(&header512[SALT_SIZE..DC01_EFFECTIVE]);
 
     // Peek Argon2 params require decrypt — try with params embedded after decrypt.
-    // We must derive with candidate params. DC01 stores params inside ciphertext, so
-    // try default params first, then common VeraCrypt-mapped defaults.
+    // We must derive with candidate params. DC01 stores params inside the ciphertext,
+    // so a wrong password tries the defaults this program writes. VeraCrypt Argon2id
+    // is a different header and is not tried here.
     let candidates: &[(u32, u32, u32)] = &[
         (
             DC01_DEFAULT_TIME,
@@ -222,7 +223,6 @@ pub fn open_dc01_header(
             DC01_DEFAULT_PARALLELISM,
         ),
         (3, 64 * 1024, 1),
-        (6, 416 * 1024, 1), // VeraCrypt PIM 12
     ];
 
     for &(time_cost, memory_kib, parallelism) in candidates {

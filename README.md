@@ -7,7 +7,7 @@ Experimental Rust encrypted-container implementation with AES-256-XTS, Argon2id,
 - **Native format:** DC01 — AES-256-XTS + Argon2id + BLAKE3 header MAC
 - **Compat:** mount some VeraCrypt/TrueCrypt volumes (AES-XTS path; incomplete cipher/cascade coverage)
 - **PQ extras:** ML-KEM-768 wrapping for **key export**, not a post-quantum disk cipher
-- **UI:** `dc` CLI + `devicecryptor` iced GUI
+- **UI:** `dc` CLI + `devicecryptor` classic main window (VeraCrypt layout, not a tabbed shell)
 - **Ops:** password change, header backup/restore, human sizes, silent password prompts
 
 This is **not** a VeraCrypt replacement and is **not** “post-quantum-ready.” See [Assurance](#assurance).
@@ -44,16 +44,14 @@ echo hi > ./mnt/hi.txt
 
 Password tip: omit `--password` to type it silently. Prefer `--password-env` over `--password` (avoids argv leaks).
 
-### GUI (full CLI parity for core tabs)
+### GUI (classic main window)
 
 ```bash
 cargo build -p dc-gui --release
 ./target/release/devicecryptor
 ```
 
-Tabs: **Create**, **Mount**, **Dismount**, **Info**, **Status**, **Favorites**, **Keywrap** — same operations as `dc` (keyfiles, PIM, hidden volumes, wipe, FS type, protect-hidden, ML-KEM wrap).
-
-**Workflow:** mount asks for password (and optional keyfile); **dismount is one click** on Status (or enter mount id on Dismount) — no credentials again.
+The window follows the classic VeraCrypt layout: slot list, Volume field, Select File, Mount, Dismount, Create Volume. Password, creation, header backup/restore, and password change are dialogs — not tabs. ML-KEM key wrap and the Argon2id benchmark sit under **Tools**. Select Device and Auto-Mount Devices are present and say clearly that system/device encryption is not in this build.
 
 See [docs/LINUX_TESTING.md](docs/LINUX_TESTING.md), [docs/ASSURANCE.md](docs/ASSURANCE.md), [docs/ROADMAP.md](docs/ROADMAP.md), [CHANGELOG.md](CHANGELOG.md).
 

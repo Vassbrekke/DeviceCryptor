@@ -86,3 +86,48 @@ pub fn default_mount_state_dir() -> Result<PathBuf, PlatformError> {
         Err(PlatformError::Unsupported("mount state"))
     }
 }
+
+/// What this build can do. Not a distro certification.
+pub fn platform_report() -> Vec<&'static str> {
+    #[cfg(target_os = "linux")]
+    {
+        vec![
+            "os: linux",
+            "container-create: yes",
+            "mount-fat-checkout: yes",
+            "mount-fat-fuse: yes",
+            "mount-ext4-loop: root-only",
+            "system-encryption: no",
+            "macos-mount: no",
+            "windows-mount: no",
+        ]
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        vec![
+            "os: other",
+            "container-create: yes",
+            "mount-fat-checkout: no",
+            "mount-fat-fuse: no",
+            "mount-ext4-loop: no",
+            "system-encryption: no",
+            "macos-mount: no",
+            "windows-mount: no",
+        ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::platform_report;
+
+    #[test]
+    fn report_refuses_system_encryption() {
+        let lines = platform_report();
+        assert!(lines.contains(&"system-encryption: no"));
+        #[cfg(target_os = "linux")]
+        assert!(lines.contains(&"mount-fat-checkout: yes"));
+        #[cfg(target_os = "linux")]
+        assert!(lines.contains(&"mount-fat-fuse: yes"));
+    }
+}

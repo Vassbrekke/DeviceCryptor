@@ -1,64 +1,81 @@
-//! DeviceCryptor GUI — full parity with the `dc` CLI (iced, no JS).
+//! DeviceCryptor main window — classic VeraCrypt layout, not a tabbed shell.
+//!
+//! Futuristic extras (ML-KEM key wrap, Argon2id benchmark) live under Tools.
+//! Disk encryption remains AES-256-XTS.
 
 use std::fs;
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use dc_crypto::{mlkem_decapsulate_key, mlkem_encapsulate_key, mlkem_generate_keypair, WrappedKey};
+use dc_crypto::{
+    bench_argon2id, bench_veracrypt_pim, fill_random, mlkem_decapsulate_key, mlkem_encapsulate_key,
+    mlkem_generate_keypair, PrfId, WrappedKey,
+};
 use dc_format::dc01::{DC01_DEFAULT_MEM_KIB, DC01_DEFAULT_PARALLELISM, DC01_DEFAULT_TIME};
 use dc_volume::{
-    add_favorite, create_container, create_container_with_hidden, dismount_session, list_favorites,
-    open_container, remove_favorite, CreateOptions, Favorite, FsType, OpenOptions,
+    add_favorite, backup_headers, change_password, create_container, create_container_with_hidden,
+    dismount_session, list_favorites, open_container, remove_favorite, restore_headers,
+    CreateOptions, Favorite, FsType, OpenOptions,
 };
+use iced::theme::Palette;
 use iced::widget::{button, checkbox, column, pick_list, row, scrollable, text, text_input, Space};
-use iced::{Element, Length, Task, Theme};
+use iced::{Color, Element, Length, Task, Theme};
+use zeroize::Zeroize;
 
 #[cfg(target_os = "linux")]
 use dc_volume::{
     format_volume, linux_dismount, linux_mount, list_mount_states, LinuxMountOptions, MountState,
 };
 
+const SLOT_COUNT: u8 = 8;
+
 fn main() -> iced::Result {
     iced::application("DeviceCryptor", App::update, App::view)
-        .theme(|_| Theme::Dark)
-        .window_size((720.0, 640.0))
-        .run_with(|| (App::default(), Task::none()))
+        .theme(classic_theme)
+        .window_size((920.0, 660.0))
+        .run_with(|| {
+            let mut app = App::default();
+            let task = app.refresh_status();
+            (app, task)
+        })
+}
+
+fn classic_theme(_: &App) -> Theme {
+    Theme::custom(
+        "Classic".into(),
+        Palette {
+            background: Color::from_rgb8(0xF0, 0xF0, 0xF0),
+            text: Color::from_rgb8(0x1A, 0x1A, 0x1A),
+            primary: Color::from_rgb8(0x31, 0x6A, 0xC5),
+            success: Color::from_rgb8(0x2E, 0x7D, 0x32),
+            danger: Color::from_rgb8(0xA1, 0x26, 0x22),
+        },
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum Tab {
+enum Dialog {
     #[default]
-    Create,
+    None,
     Mount,
-    Dismount,
-    Info,
-    Status,
+    Create,
+    Chpasswd,
+    HeaderBackup,
+    HeaderRestore,
+    Properties,
     Favorites,
     Keywrap,
+    Keyfile,
+    Benchmark,
+    About,
 }
 
-impl Tab {
-    const ALL: [Tab; 7] = [
-        Tab::Create,
-        Tab::Mount,
-        Tab::Dismount,
-        Tab::Info,
-        Tab::Status,
-        Tab::Favorites,
-        Tab::Keywrap,
-    ];
-
-    fn label(self) -> &'static str {
-        match self {
-            Tab::Create => "Create",
-            Tab::Mount => "Mount",
-            Tab::Dismount => "Dismount",
-            Tab::Info => "Info",
-            Tab::Status => "Status",
-            Tab::Favorites => "Favorites",
-            Tab::Keywrap => "Keywrap",
-        }
-    }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Menu {
+    Volumes,
+    Tools,
+    Help,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,10 +97,10 @@ impl FsChoice {
 
     fn label(self) -> &'static str {
         match self {
-            FsChoice::Fat32 => "fat32",
+            FsChoice::Fat32 => "FAT",
             FsChoice::Ext4 => "ext4",
-            FsChoice::None => "none",
-            FsChoice::Auto => "auto",
+            FsChoice::None => "None",
+            FsChoice::Auto => "Auto",
         }
     }
 
@@ -102,14 +119,83 @@ impl std::fmt::Display for FsChoice {
     }
 }
 
+/// VeraCrypt PKCS-5 PRF, as on the password dialog.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum PrfChoice {
+    #[default]
+    Auto,
+    Sha512,
+    Sha256,
+    Blake2s,
+    Whirlpool,
+    Streebog,
+    Argon2,
+}
+
+impl PrfChoice {
+    const ALL: [PrfChoice; 7] = [
+        PrfChoice::Auto,
+        PrfChoice::Sha512,
+        PrfChoice::Sha256,
+        PrfChoice::Blake2s,
+        PrfChoice::Whirlpool,
+        PrfChoice::Streebog,
+        PrfChoice::Argon2,
+    ];
+
+    fn label(self) -> &'static str {
+        match self {
+            PrfChoice::Auto => "Autodetect",
+            PrfChoice::Sha512 => "HMAC-SHA-512",
+            PrfChoice::Sha256 => "HMAC-SHA-256",
+            PrfChoice::Blake2s => "HMAC-BLAKE2s",
+            PrfChoice::Whirlpool => "HMAC-Whirlpool",
+            PrfChoice::Streebog => "HMAC-Streebog",
+            PrfChoice::Argon2 => "Argon2id",
+        }
+    }
+
+    fn as_prf(self) -> Option<PrfId> {
+        match self {
+            PrfChoice::Auto => None,
+            PrfChoice::Sha512 => Some(PrfId::Sha512),
+            PrfChoice::Sha256 => Some(PrfId::Sha256),
+            PrfChoice::Blake2s => Some(PrfId::Blake2s),
+            PrfChoice::Whirlpool => Some(PrfId::Whirlpool),
+            PrfChoice::Streebog => Some(PrfId::Streebog),
+            PrfChoice::Argon2 => Some(PrfId::Argon2id),
+        }
+    }
+}
+
+impl std::fmt::Display for PrfChoice {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 struct App {
-    tab: Tab,
+    menu: Option<Menu>,
+    dialog: Dialog,
     busy: bool,
     status: String,
+    volume_path: String,
+    never_save_history: bool,
+    selected_slot: u8,
+    status_mounts: Vec<StatusRow>,
 
-    // Create
-    create_path: String,
+    mount_point: String,
+    mount_password: String,
+    mount_keyfile: String,
+    mount_pim: String,
+    vc_prf: PrfChoice,
+    mount_fs: FsChoice,
+    mount_protect_hidden: bool,
+    mount_live: bool,
+    mount_hidden_password: String,
+
     create_password: String,
+    create_confirm: String,
     create_size_mb: String,
     create_fs: FsChoice,
     create_keyfile: String,
@@ -117,40 +203,31 @@ struct App {
     create_hidden_password: String,
     create_wipe: bool,
 
-    // Mount
-    mount_path: String,
-    mount_point: String,
-    mount_password: String,
-    mount_keyfile: String,
-    mount_pim: String,
-    mount_id: String,
-    mount_fs: FsChoice,
-    mount_protect_hidden: bool,
-    mount_hidden_password: String,
+    cp_old: String,
+    cp_new: String,
+    cp_confirm: String,
+    cp_keyfile: String,
+    cp_new_keyfile: String,
 
-    // Dismount
-    dismount_id: String,
+    hdr_file: String,
 
-    // Info
-    info_path: String,
     info_password: String,
     info_keyfile: String,
     info_pim: String,
 
-    // Status (active mounts for click-to-dismount)
-    status_mounts: Vec<StatusRow>,
-
-    // Favorites
     fav_path: String,
     fav_label: String,
     fav_automount: bool,
     fav_list: String,
 
-    // Keywrap
     kw_ek: String,
     kw_dk: String,
     kw_infile: String,
     kw_outfile: String,
+
+    kf_path: String,
+    kf_bytes: String,
+    bench_pim: String,
 }
 
 #[derive(Debug, Clone)]
@@ -159,37 +236,47 @@ struct StatusRow {
     backend: String,
     container: String,
     mountpoint: String,
+    fs: String,
+    session_store: String,
 }
 
 impl Default for App {
     fn default() -> Self {
         Self {
-            tab: Tab::Create,
+            menu: None,
+            dialog: Dialog::None,
             busy: false,
             status: String::new(),
-            create_path: String::new(),
+            volume_path: String::new(),
+            never_save_history: false,
+            selected_slot: 1,
+            status_mounts: Vec::new(),
+            mount_point: String::new(),
+            mount_password: String::new(),
+            mount_keyfile: String::new(),
+            mount_pim: "0".into(),
+            vc_prf: PrfChoice::Auto,
+            mount_fs: FsChoice::Auto,
+            mount_protect_hidden: false,
+            mount_live: false,
+            mount_hidden_password: String::new(),
             create_password: String::new(),
+            create_confirm: String::new(),
             create_size_mb: "16".into(),
             create_fs: FsChoice::Fat32,
             create_keyfile: String::new(),
             create_hidden_mb: String::new(),
             create_hidden_password: String::new(),
             create_wipe: false,
-            mount_path: String::new(),
-            mount_point: String::new(),
-            mount_password: String::new(),
-            mount_keyfile: String::new(),
-            mount_pim: "0".into(),
-            mount_id: "default".into(),
-            mount_fs: FsChoice::Auto,
-            mount_protect_hidden: false,
-            mount_hidden_password: String::new(),
-            dismount_id: "default".into(),
-            info_path: String::new(),
+            cp_old: String::new(),
+            cp_new: String::new(),
+            cp_confirm: String::new(),
+            cp_keyfile: String::new(),
+            cp_new_keyfile: String::new(),
+            hdr_file: String::new(),
             info_password: String::new(),
             info_keyfile: String::new(),
             info_pim: "0".into(),
-            status_mounts: Vec::new(),
             fav_path: String::new(),
             fav_label: String::new(),
             fav_automount: false,
@@ -198,63 +285,75 @@ impl Default for App {
             kw_dk: String::new(),
             kw_infile: String::new(),
             kw_outfile: String::new(),
+            kf_path: String::new(),
+            kf_bytes: "64".into(),
+            bench_pim: "0".into(),
         }
     }
 }
 
 #[derive(Debug, Clone)]
 enum Message {
-    Tab(Tab),
+    ToggleMenu(Menu),
+    Open(Dialog),
+    CloseDialog,
+    SelectSlot(u8),
+    VolumePath(String),
+    NeverSaveHistory(bool),
+    SelectFile,
+    SelectDevice,
+    AutoMountDevices,
+    DoDismountSelected,
+    DoDismountAll,
+    DoStatus,
     OpFinished(Result<String, String>),
+    StatusLoaded(Result<Vec<StatusRow>, String>),
 
-    // Create fields
-    CreatePath(String),
+    MountPoint(String),
+    MountPassword(String),
+    MountKeyfile(String),
+    MountPim(String),
+    VcPrf(PrfChoice),
+    MountFs(FsChoice),
+    MountProtectHidden(bool),
+    MountLive(bool),
+    MountHiddenPassword(String),
+    BrowseMountPoint,
+    BrowseMountKeyfile,
+    DoMount,
+
     CreatePassword(String),
+    CreateConfirm(String),
     CreateSize(String),
     CreateFs(FsChoice),
     CreateKeyfile(String),
     CreateHiddenMb(String),
     CreateHiddenPassword(String),
     CreateWipe(bool),
-    BrowseCreatePath,
     BrowseCreateKeyfile,
     DoCreate,
 
-    // Mount
-    MountPath(String),
-    MountPoint(String),
-    MountPassword(String),
-    MountKeyfile(String),
-    MountPim(String),
-    MountId(String),
-    MountFs(FsChoice),
-    MountProtectHidden(bool),
-    MountHiddenPassword(String),
-    BrowseMountPath,
-    BrowseMountPoint,
-    BrowseMountKeyfile,
-    DoMount,
+    CpOld(String),
+    CpNew(String),
+    CpConfirm(String),
+    CpKeyfile(String),
+    CpNewKeyfile(String),
+    BrowseCpKeyfile,
+    BrowseCpNewKeyfile,
+    DoChpasswd,
 
-    // Dismount
-    DismountId(String),
-    DoDismount,
-    /// Dismount a specific active mount (from Status list).
-    DoDismountId(String),
+    HdrFile(String),
+    BrowseHdrSave,
+    BrowseHdrOpen,
+    DoHeaderBackup,
+    DoHeaderRestore,
 
-    // Info
-    InfoPath(String),
     InfoPassword(String),
     InfoKeyfile(String),
     InfoPim(String),
-    BrowseInfoPath,
     BrowseInfoKeyfile,
     DoInfo,
 
-    // Status
-    DoStatus,
-    StatusLoaded(Result<Vec<StatusRow>, String>),
-
-    // Favorites
     FavPath(String),
     FavLabel(String),
     FavAutomount(bool),
@@ -262,8 +361,8 @@ enum Message {
     DoFavList,
     DoFavAdd,
     DoFavRemove,
+    UseFavorite(String),
 
-    // Keywrap
     KwEk(String),
     KwDk(String),
     KwInfile(String),
@@ -275,49 +374,96 @@ enum Message {
     DoKwGen,
     DoKwWrap,
     DoKwUnwrap,
+
+    KfPath(String),
+    KfBytes(String),
+    BrowseKfPath,
+    DoKeyfile,
+
+    BenchPim(String),
+    DoBenchDc01,
+    DoBenchPim,
 }
 
 impl App {
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
-            Message::Tab(t) => {
-                self.tab = t;
-                if t == Tab::Favorites {
-                    return self.run_op(|| fav_list());
+            Message::ToggleMenu(menu) => {
+                self.menu = if self.menu == Some(menu) {
+                    None
+                } else {
+                    Some(menu)
+                };
+            }
+            Message::Open(dialog) => {
+                self.menu = None;
+                self.dialog = dialog;
+                if dialog == Dialog::Mount && self.mount_point.trim().is_empty() {
+                    self.mount_point = default_mountpoint(self.selected_slot);
                 }
-                if t == Tab::Status {
-                    return self.refresh_status();
+                if dialog == Dialog::Favorites {
+                    return self.run_op(fav_list);
                 }
+            }
+            Message::CloseDialog => {
+                self.dialog = Dialog::None;
+                self.clear_secrets();
+            }
+            Message::SelectSlot(n) => {
+                self.selected_slot = n;
+                if let Some(row) = self.mount_for_slot(n) {
+                    self.volume_path = row.container.clone();
+                }
+            }
+            Message::VolumePath(v) => self.volume_path = v,
+            Message::NeverSaveHistory(v) => self.never_save_history = v,
+            Message::SelectFile => {
+                if let Some(p) = rfd::FileDialog::new().set_title("Select File").pick_file() {
+                    self.volume_path = p.display().to_string();
+                }
+            }
+            Message::SelectDevice => {
+                self.status = "Select Device is not available in this build. System and partition encryption are not ready — use Select File for a container.".into();
+            }
+            Message::AutoMountDevices => {
+                self.status = "Auto-Mount Devices is not available in this build. File containers only. Use Tools → Favorite Volumes, then Mount.".into();
+            }
+            Message::DoDismountSelected => {
+                let id = slot_id(self.selected_slot);
+                return self.run_op(move || run_dismount(&id));
+            }
+            Message::DoDismountAll => return self.run_op(run_dismount_all),
+            Message::DoStatus => {
+                self.status = "working…".into();
+                return self.refresh_status();
             }
             Message::OpFinished(res) => {
                 self.busy = false;
                 match res {
                     Ok(s) => {
-                        if self.tab == Tab::Favorites {
-                            self.fav_list = s.clone();
+                        let stay = matches!(
+                            self.dialog,
+                            Dialog::Favorites
+                                | Dialog::Keywrap
+                                | Dialog::Benchmark
+                                | Dialog::About
+                                | Dialog::None
+                        );
+                        if self.dialog == Dialog::Favorites {
+                            self.fav_list = s;
+                            self.status = "favorites updated".into();
+                        } else {
+                            self.status = s;
                         }
-                        // Drop secrets from UI state after success (not logged).
-                        match self.tab {
-                            Tab::Create => {
-                                self.create_password.clear();
-                                self.create_hidden_password.clear();
+                        self.clear_secrets();
+                        if !stay {
+                            if self.never_save_history {
+                                self.volume_path.clear();
                             }
-                            Tab::Mount => {
-                                self.mount_password.clear();
-                                self.mount_hidden_password.clear();
-                            }
-                            Tab::Info => self.info_password.clear(),
-                            _ => {}
+                            self.dialog = Dialog::None;
                         }
-                        self.status = s;
-                        // Keep the Status list in sync after mount/dismount without clobbering
-                        // the success line unless the user is on the Status tab.
-                        if self.tab == Tab::Status {
-                            return self.refresh_status();
-                        }
-                        if self.tab == Tab::Dismount || self.tab == Tab::Mount {
-                            return self.refresh_status_quiet();
-                        }
+                        self.menu = None;
+                        return self.refresh_status_quiet();
                     }
                     Err(e) => self.status = format!("error: {e}"),
                 }
@@ -327,66 +473,34 @@ impl App {
                 match res {
                     Ok(rows) => {
                         self.status_mounts = rows;
-                        if self.tab == Tab::Status {
-                            if self.status_mounts.is_empty() {
-                                self.status = "(no mounts)".into();
+                        if self.status.is_empty() || self.status == "working…" {
+                            self.status = if self.status_mounts.is_empty() {
+                                "No volumes mounted".into()
                             } else {
-                                self.status =
-                                    format!("{} active mount(s)", self.status_mounts.len());
-                            }
+                                format!("{} volume(s) mounted", self.status_mounts.len())
+                            };
                         }
                     }
                     Err(e) => {
-                        if self.tab == Tab::Status {
+                        if self.status.is_empty() || self.status == "working…" {
                             self.status = format!("error: {e}");
                         }
                     }
                 }
             }
 
-            Message::CreatePath(v) => self.create_path = v,
-            Message::CreatePassword(v) => self.create_password = v,
-            Message::CreateSize(v) => self.create_size_mb = v,
-            Message::CreateFs(v) => self.create_fs = v,
-            Message::CreateKeyfile(v) => self.create_keyfile = v,
-            Message::CreateHiddenMb(v) => self.create_hidden_mb = v,
-            Message::CreateHiddenPassword(v) => self.create_hidden_password = v,
-            Message::CreateWipe(v) => self.create_wipe = v,
-            Message::BrowseCreatePath => {
-                if let Some(p) = rfd::FileDialog::new()
-                    .set_title("New container")
-                    .save_file()
-                {
-                    self.create_path = p.display().to_string();
-                }
-            }
-            Message::BrowseCreateKeyfile => {
-                if let Some(p) = rfd::FileDialog::new().set_title("Keyfile").pick_file() {
-                    self.create_keyfile = p.display().to_string();
-                }
-            }
-            Message::DoCreate => {
-                let snap = CreateSnap::from(&*self);
-                return self.run_op(move || snap.run());
-            }
-
-            Message::MountPath(v) => self.mount_path = v,
             Message::MountPoint(v) => self.mount_point = v,
             Message::MountPassword(v) => self.mount_password = v,
             Message::MountKeyfile(v) => self.mount_keyfile = v,
             Message::MountPim(v) => self.mount_pim = v,
-            Message::MountId(v) => self.mount_id = v,
+            Message::VcPrf(v) => self.vc_prf = v,
             Message::MountFs(v) => self.mount_fs = v,
             Message::MountProtectHidden(v) => self.mount_protect_hidden = v,
+            Message::MountLive(v) => self.mount_live = v,
             Message::MountHiddenPassword(v) => self.mount_hidden_password = v,
-            Message::BrowseMountPath => {
-                if let Some(p) = rfd::FileDialog::new().set_title("Container").pick_file() {
-                    self.mount_path = p.display().to_string();
-                }
-            }
             Message::BrowseMountPoint => {
                 if let Some(p) = rfd::FileDialog::new()
-                    .set_title("Mountpoint directory")
+                    .set_title("Mount directory")
                     .pick_folder()
                 {
                     self.mount_point = p.display().to_string();
@@ -402,25 +516,90 @@ impl App {
                 return self.run_op(move || snap.run());
             }
 
-            Message::DismountId(v) => self.dismount_id = v,
-            Message::DoDismount => {
-                let id = self.dismount_id.clone();
-                return self.run_op(move || run_dismount(&id));
+            Message::CreatePassword(v) => self.create_password = v,
+            Message::CreateConfirm(v) => self.create_confirm = v,
+            Message::CreateSize(v) => self.create_size_mb = v,
+            Message::CreateFs(v) => self.create_fs = v,
+            Message::CreateKeyfile(v) => self.create_keyfile = v,
+            Message::CreateHiddenMb(v) => self.create_hidden_mb = v,
+            Message::CreateHiddenPassword(v) => self.create_hidden_password = v,
+            Message::CreateWipe(v) => self.create_wipe = v,
+            Message::BrowseCreateKeyfile => {
+                if let Some(p) = rfd::FileDialog::new().set_title("Keyfile").pick_file() {
+                    self.create_keyfile = p.display().to_string();
+                }
             }
-            Message::DoDismountId(id) => {
-                self.dismount_id = id.clone();
-                return self.run_op(move || run_dismount(&id));
+            Message::DoCreate => {
+                let snap = CreateSnap::from(&*self);
+                return self.run_op(move || snap.run());
             }
 
-            Message::InfoPath(v) => self.info_path = v,
+            Message::CpOld(v) => self.cp_old = v,
+            Message::CpNew(v) => self.cp_new = v,
+            Message::CpConfirm(v) => self.cp_confirm = v,
+            Message::CpKeyfile(v) => self.cp_keyfile = v,
+            Message::CpNewKeyfile(v) => self.cp_new_keyfile = v,
+            Message::BrowseCpKeyfile => {
+                if let Some(p) = rfd::FileDialog::new().set_title("Keyfile").pick_file() {
+                    self.cp_keyfile = p.display().to_string();
+                }
+            }
+            Message::BrowseCpNewKeyfile => {
+                if let Some(p) = rfd::FileDialog::new().set_title("New keyfile").pick_file() {
+                    self.cp_new_keyfile = p.display().to_string();
+                }
+            }
+            Message::DoChpasswd => {
+                let snap = ChpasswdSnap::from(&*self);
+                return self.run_op(move || snap.run());
+            }
+
+            Message::HdrFile(v) => self.hdr_file = v,
+            Message::BrowseHdrSave => {
+                if let Some(p) = rfd::FileDialog::new()
+                    .set_title("Backup Volume Header")
+                    .save_file()
+                {
+                    self.hdr_file = p.display().to_string();
+                }
+            }
+            Message::BrowseHdrOpen => {
+                if let Some(p) = rfd::FileDialog::new()
+                    .set_title("Restore Volume Header")
+                    .pick_file()
+                {
+                    self.hdr_file = p.display().to_string();
+                }
+            }
+            Message::DoHeaderBackup => {
+                let container = PathBuf::from(&self.volume_path);
+                let file = PathBuf::from(&self.hdr_file);
+                return self.run_op(move || {
+                    if container.as_os_str().is_empty() || file.as_os_str().is_empty() {
+                        anyhow::bail!("volume and backup file required");
+                    }
+                    backup_headers(&container, &file)?;
+                    Ok(format!(
+                        "header backup written to {} (mode 0600)",
+                        file.display()
+                    ))
+                });
+            }
+            Message::DoHeaderRestore => {
+                let container = PathBuf::from(&self.volume_path);
+                let file = PathBuf::from(&self.hdr_file);
+                return self.run_op(move || {
+                    if container.as_os_str().is_empty() || file.as_os_str().is_empty() {
+                        anyhow::bail!("volume and backup file required");
+                    }
+                    restore_headers(&container, &file)?;
+                    Ok(format!("header restored into {}", container.display()))
+                });
+            }
+
             Message::InfoPassword(v) => self.info_password = v,
             Message::InfoKeyfile(v) => self.info_keyfile = v,
             Message::InfoPim(v) => self.info_pim = v,
-            Message::BrowseInfoPath => {
-                if let Some(p) = rfd::FileDialog::new().set_title("Container").pick_file() {
-                    self.info_path = p.display().to_string();
-                }
-            }
             Message::BrowseInfoKeyfile => {
                 if let Some(p) = rfd::FileDialog::new().set_title("Keyfile").pick_file() {
                     self.info_keyfile = p.display().to_string();
@@ -431,8 +610,6 @@ impl App {
                 return self.run_op(move || snap.run());
             }
 
-            Message::DoStatus => return self.refresh_status(),
-
             Message::FavPath(v) => self.fav_path = v,
             Message::FavLabel(v) => self.fav_label = v,
             Message::FavAutomount(v) => self.fav_automount = v,
@@ -441,7 +618,7 @@ impl App {
                     self.fav_path = p.display().to_string();
                 }
             }
-            Message::DoFavList => return self.run_op(|| fav_list()),
+            Message::DoFavList => return self.run_op(fav_list),
             Message::DoFavAdd => {
                 let path = PathBuf::from(self.fav_path.clone());
                 let label = self.fav_label.clone();
@@ -464,6 +641,11 @@ impl App {
                     remove_favorite(&path)?;
                     fav_list()
                 });
+            }
+            Message::UseFavorite(path) => {
+                self.volume_path = path;
+                self.dialog = Dialog::None;
+                self.status = "volume selected — enter the password with Mount".into();
             }
 
             Message::KwEk(v) => self.kw_ek = v,
@@ -552,8 +734,73 @@ impl App {
                     Ok(format!("unwrapped → {}", outfile.display()))
                 });
             }
+
+            Message::KfPath(v) => self.kf_path = v,
+            Message::KfBytes(v) => self.kf_bytes = v,
+            Message::BrowseKfPath => {
+                if let Some(p) = rfd::FileDialog::new().set_title("Keyfile").save_file() {
+                    self.kf_path = p.display().to_string();
+                }
+            }
+            Message::DoKeyfile => {
+                let path = PathBuf::from(self.kf_path.clone());
+                let bytes = self.kf_bytes.clone();
+                return self.run_op(move || write_keyfile(&path, &bytes));
+            }
+
+            Message::BenchPim(v) => self.bench_pim = v,
+            Message::DoBenchDc01 => {
+                return self.run_op(|| {
+                    let b = bench_argon2id(
+                        "dc01",
+                        DC01_DEFAULT_TIME,
+                        DC01_DEFAULT_MEM_KIB,
+                        DC01_DEFAULT_PARALLELISM,
+                    )?;
+                    Ok(format!(
+                        "DC01 Argon2id  t={} m={} KiB p={}  {} ms",
+                        b.time_cost, b.memory_kib, b.parallelism, b.elapsed_ms
+                    ))
+                });
+            }
+            Message::DoBenchPim => {
+                let pim = self.bench_pim.clone();
+                return self.run_op(move || {
+                    let pim = parse_pim(&pim)?;
+                    let b = bench_veracrypt_pim(pim)?;
+                    Ok(format!(
+                        "VeraCrypt Argon2id PIM {pim}  t={} m={} KiB p={}  {} ms{}",
+                        b.time_cost,
+                        b.memory_kib,
+                        b.parallelism,
+                        b.elapsed_ms,
+                        if pim == 0 {
+                            "\n(PIM 0 uses VeraCrypt default PIM 12)"
+                        } else {
+                            ""
+                        }
+                    ))
+                });
+            }
         }
         Task::none()
+    }
+
+    fn clear_secrets(&mut self) {
+        self.mount_password.clear();
+        self.mount_hidden_password.clear();
+        self.create_password.clear();
+        self.create_confirm.clear();
+        self.create_hidden_password.clear();
+        self.cp_old.clear();
+        self.cp_new.clear();
+        self.cp_confirm.clear();
+        self.info_password.clear();
+    }
+
+    fn mount_for_slot(&self, n: u8) -> Option<&StatusRow> {
+        let id = slot_id(n);
+        self.status_mounts.iter().find(|m| m.id == id)
     }
 
     fn run_op<F>(&mut self, f: F) -> Task<Message>
@@ -561,7 +808,7 @@ impl App {
         F: FnOnce() -> anyhow::Result<String> + Send + 'static,
     {
         if self.busy {
-            self.status = "busy — wait for current operation".into();
+            self.status = "busy — wait for the current operation".into();
             return Task::none();
         }
         self.busy = true;
@@ -586,7 +833,6 @@ impl App {
         self.spawn_status_load()
     }
 
-    /// Update `status_mounts` without flipping busy or status text first.
     fn refresh_status_quiet(&mut self) -> Task<Message> {
         self.spawn_status_load()
     }
@@ -605,84 +851,315 @@ impl App {
     }
 
     fn view(&self) -> Element<'_, Message> {
-        let tabs = row(Tab::ALL.iter().map(|t| {
-            let label = t.label();
-            let btn = if *t == self.tab {
-                button(text(label)).on_press(Message::Tab(*t))
-            } else {
-                button(text(label))
-                    .style(iced::widget::button::secondary)
-                    .on_press(Message::Tab(*t))
-            };
-            btn.into()
-        }))
+        let mut page = column![
+            self.view_menu_bar(),
+            text("Linux file containers  ·  AES-256-XTS").size(12),
+        ]
         .spacing(6)
-        .wrap();
+        .padding(10)
+        .width(Length::Fill);
 
-        let body: Element<'_, Message> = match self.tab {
-            Tab::Create => self.view_create(),
-            Tab::Mount => self.view_mount(),
-            Tab::Dismount => self.view_dismount(),
-            Tab::Info => self.view_info(),
-            Tab::Status => self.view_status(),
-            Tab::Favorites => self.view_favorites(),
-            Tab::Keywrap => self.view_keywrap(),
-        };
-
-        let busy = if self.busy {
-            text("Status: working…")
+        if let Some(drop) = self.view_menu_dropdown() {
+            page = page.push(drop);
+        }
+        page = page.push(self.view_slots());
+        page = page.push(self.view_volume_row());
+        page = page.push(self.view_actions());
+        page = page.push(
+            checkbox("Never save history", self.never_save_history)
+                .on_toggle(Message::NeverSaveHistory),
+        );
+        if self.dialog != Dialog::None {
+            page = page.push(Space::with_height(6));
+            page = page.push(self.view_dialog());
+        }
+        page = page.push(Space::with_height(8));
+        let status = if self.busy {
+            format!("working…  {}", self.status)
         } else {
-            text("Status:")
+            self.status.clone()
         };
+        page = page.push(text(status).size(13));
 
-        scrollable(
-            column![
-                text("DeviceCryptor").size(28),
-                text("experimental · unaudited — AES-256-XTS · Argon2id · DC01").size(13),
-                Space::with_height(8),
-                tabs,
-                Space::with_height(12),
-                body,
-                Space::with_height(12),
-                busy,
-                text(&self.status),
-            ]
-            .spacing(8)
-            .padding(20)
-            .width(Length::Fill),
-        )
-        .width(Length::Fill)
-        .height(Length::Fill)
+        scrollable(page)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
+    }
+
+    fn view_menu_bar(&self) -> Element<'_, Message> {
+        row![
+            menu_button("Volumes", Menu::Volumes, self.menu, self.busy),
+            menu_button("Tools", Menu::Tools, self.menu, self.busy),
+            menu_button("Help", Menu::Help, self.menu, self.busy),
+        ]
+        .spacing(4)
         .into()
     }
 
-    fn view_create(&self) -> Element<'_, Message> {
+    fn view_menu_dropdown(&self) -> Option<Element<'_, Message>> {
+        let items: &[(&str, Message)] = match self.menu? {
+            Menu::Volumes => &[
+                ("Create New Volume...", Message::Open(Dialog::Create)),
+                ("Mount Volume", Message::Open(Dialog::Mount)),
+                ("Dismount Volume", Message::DoDismountSelected),
+                ("Dismount All", Message::DoDismountAll),
+                ("Change Volume Password...", Message::Open(Dialog::Chpasswd)),
+                (
+                    "Backup Volume Header...",
+                    Message::Open(Dialog::HeaderBackup),
+                ),
+                (
+                    "Restore Volume Header...",
+                    Message::Open(Dialog::HeaderRestore),
+                ),
+                ("Volume Properties...", Message::Open(Dialog::Properties)),
+            ],
+            Menu::Tools => &[
+                ("Benchmark...", Message::Open(Dialog::Benchmark)),
+                ("Keyfile Generator...", Message::Open(Dialog::Keyfile)),
+                ("Favorite Volumes...", Message::Open(Dialog::Favorites)),
+                ("Post-quantum key wrap...", Message::Open(Dialog::Keywrap)),
+            ],
+            Menu::Help => &[("About DeviceCryptor", Message::Open(Dialog::About))],
+        };
+        let mut col = column![].spacing(2);
+        for (label, msg) in items {
+            col = col.push(cmd_button(label, msg.clone(), self.busy));
+        }
+        Some(col.into())
+    }
+
+    fn view_slots(&self) -> Element<'_, Message> {
+        let header = row![
+            cell("Slot", 48.0),
+            cell("Volume", 280.0),
+            cell("Size", 70.0),
+            cell("Encryption", 110.0),
+            cell("Type", 90.0),
+            cell("Mount Directory", 220.0),
+        ]
+        .spacing(6);
+
+        let mut list = column![header].spacing(2);
+        list = list.push(cmd_button("Refresh", Message::DoStatus, self.busy));
+
+        for n in 1..=SLOT_COUNT {
+            list = list.push(self.slot_row(n, self.mount_for_slot(n)));
+        }
+        for extra in self.status_mounts.iter().filter(|m| !is_slot_id(&m.id)) {
+            list = list.push(self.extra_row(extra));
+        }
+
+        scrollable(list.spacing(2).width(Length::Fill))
+            .height(Length::Fixed(168.0))
+            .into()
+    }
+
+    fn slot_row(&self, n: u8, mounted: Option<&StatusRow>) -> Element<'_, Message> {
+        let (vol, enc, ty, mnt) = if let Some(m) = mounted {
+            (
+                shorten(&m.container, 36),
+                "AES-256-XTS".to_string(),
+                type_label(m),
+                shorten(&m.mountpoint, 28),
+            )
+        } else {
+            ("—".into(), "—".into(), "—".into(), "—".into())
+        };
+        let selected = self.selected_slot == n;
+        let body = row![
+            cell(n.to_string(), 48.0),
+            cell(vol, 280.0),
+            cell("—", 70.0),
+            cell(enc, 110.0),
+            cell(ty, 90.0),
+            cell(mnt, 220.0),
+        ]
+        .spacing(6);
+        let mut btn = button(body).width(Length::Fill).padding(2);
+        btn = if selected {
+            btn.style(button::primary)
+        } else {
+            btn.style(button::secondary)
+        };
+        if !self.busy {
+            btn = btn.on_press(Message::SelectSlot(n));
+        }
+        btn.into()
+    }
+
+    fn extra_row(&self, m: &StatusRow) -> Element<'_, Message> {
+        row![
+            cell(shorten(&m.id, 8), 48.0),
+            cell(shorten(&m.container, 36), 280.0),
+            cell("—", 70.0),
+            cell("AES-256-XTS", 110.0),
+            cell(type_label(m), 90.0),
+            cell(shorten(&m.mountpoint, 28), 220.0),
+        ]
+        .spacing(6)
+        .into()
+    }
+
+    fn view_volume_row(&self) -> Element<'_, Message> {
+        row![
+            text("Volume:").width(70),
+            text_input("", &self.volume_path)
+                .on_input(Message::VolumePath)
+                .padding(6)
+                .width(Length::Fill),
+            cmd_button("Select File...", Message::SelectFile, self.busy),
+            cmd_button("Select Device...", Message::SelectDevice, self.busy),
+        ]
+        .spacing(6)
+        .align_y(iced::Alignment::Center)
+        .into()
+    }
+
+    fn view_actions(&self) -> Element<'_, Message> {
+        row![
+            cmd_button("Mount", Message::Open(Dialog::Mount), self.busy),
+            cmd_button("Dismount", Message::DoDismountSelected, self.busy),
+            cmd_button("Create Volume", Message::Open(Dialog::Create), self.busy),
+            cmd_button("Auto-Mount Devices", Message::AutoMountDevices, self.busy),
+        ]
+        .spacing(8)
+        .into()
+    }
+
+    fn view_dialog(&self) -> Element<'_, Message> {
+        let title = match self.dialog {
+            Dialog::None => "",
+            Dialog::Mount => "Enter Password",
+            Dialog::Create => "Volume Creation",
+            Dialog::Chpasswd => "Change Password or Keyfiles",
+            Dialog::HeaderBackup => "Backup Volume Header",
+            Dialog::HeaderRestore => "Restore Volume Header",
+            Dialog::Properties => "Volume Properties",
+            Dialog::Favorites => "Favorite Volumes",
+            Dialog::Keywrap => "Post-quantum key wrap",
+            Dialog::Keyfile => "Keyfile Generator",
+            Dialog::Benchmark => "Benchmark",
+            Dialog::About => "About DeviceCryptor",
+        };
+        let body = match self.dialog {
+            Dialog::None => column![].into(),
+            Dialog::Mount => self.view_mount_dialog(),
+            Dialog::Create => self.view_create_dialog(),
+            Dialog::Chpasswd => self.view_chpasswd_dialog(),
+            Dialog::HeaderBackup => self.view_header_dialog(true),
+            Dialog::HeaderRestore => self.view_header_dialog(false),
+            Dialog::Properties => self.view_properties_dialog(),
+            Dialog::Favorites => self.view_favorites_dialog(),
+            Dialog::Keywrap => self.view_keywrap_dialog(),
+            Dialog::Keyfile => self.view_keyfile_dialog(),
+            Dialog::Benchmark => self.view_bench_dialog(),
+            Dialog::About => self.view_about_dialog(),
+        };
         column![
-            labeled_row(
-                "Container",
-                text_input("path.dc", &self.create_path)
-                    .on_input(Message::CreatePath)
-                    .padding(8),
-                button("Browse").on_press(Message::BrowseCreatePath),
+            text(title).size(16),
+            body,
+            cmd_button("Cancel", Message::CloseDialog, false),
+        ]
+        .spacing(8)
+        .into()
+    }
+
+    fn view_mount_dialog(&self) -> Element<'_, Message> {
+        column![
+            text(format!(
+                "Slot {}  ·  {}",
+                self.selected_slot,
+                if self.volume_path.is_empty() {
+                    "(no volume selected)"
+                } else {
+                    self.volume_path.as_str()
+                }
+            ))
+            .size(13),
+            text_input("Password", &self.mount_password)
+                .secure(true)
+                .on_input(Message::MountPassword)
+                .padding(6),
+            labeled(
+                "Keyfiles",
+                text_input("optional, comma-separated", &self.mount_keyfile)
+                    .on_input(Message::MountKeyfile)
+                    .padding(6),
+                cmd_button("Keyfiles...", Message::BrowseMountKeyfile, self.busy),
             ),
+            labeled(
+                "Mount at",
+                text_input("directory", &self.mount_point)
+                    .on_input(Message::MountPoint)
+                    .padding(6),
+                cmd_button("Browse", Message::BrowseMountPoint, self.busy),
+            ),
+            row![
+                text("PIM"),
+                text_input("0", &self.mount_pim)
+                    .on_input(Message::MountPim)
+                    .padding(6)
+                    .width(80),
+                text("(empty or 0 for defaults)"),
+                text("PKCS-5 PRF"),
+                pick_list(PrfChoice::ALL, Some(self.vc_prf), Message::VcPrf),
+                text("Filesystem"),
+                pick_list(FsChoice::MOUNT, Some(self.mount_fs), Message::MountFs),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+            checkbox("Protect hidden volume", self.mount_protect_hidden)
+                .on_toggle(Message::MountProtectHidden),
+            checkbox(
+                "Live mount (writes through; this window must stay open)",
+                self.mount_live,
+            )
+            .on_toggle(Message::MountLive),
+            text_input("Hidden password", &self.mount_hidden_password)
+                .secure(true)
+                .on_input(Message::MountHiddenPassword)
+                .padding(6),
+            text("Dismount does not ask for the password again.").size(12),
+            cmd_button("OK", Message::DoMount, self.busy),
+        ]
+        .spacing(6)
+        .into()
+    }
+
+    fn view_create_dialog(&self) -> Element<'_, Message> {
+        column![
+            text("Encryption: AES-256-XTS. Password hashing: Argon2id. Header MAC: BLAKE3.")
+                .size(12),
+            text(if self.volume_path.is_empty() {
+                "Choose Select File on the main window, or type a new path in Volume."
+            } else {
+                "Volume location is the path in the Volume field."
+            })
+            .size(13),
             text_input("Password", &self.create_password)
                 .secure(true)
                 .on_input(Message::CreatePassword)
-                .padding(8),
-            labeled_row(
-                "Keyfile",
-                text_input("optional, comma-separated", &self.create_keyfile)
+                .padding(6),
+            text_input("Confirm password", &self.create_confirm)
+                .secure(true)
+                .on_input(Message::CreateConfirm)
+                .padding(6),
+            labeled(
+                "Keyfiles",
+                text_input("optional", &self.create_keyfile)
                     .on_input(Message::CreateKeyfile)
-                    .padding(8),
-                button("Browse").on_press(Message::BrowseCreateKeyfile),
+                    .padding(6),
+                cmd_button("Keyfiles...", Message::BrowseCreateKeyfile, self.busy),
             ),
             row![
                 text("Size MiB"),
                 text_input("16", &self.create_size_mb)
                     .on_input(Message::CreateSize)
-                    .padding(8)
-                    .width(100),
-                text("FS"),
+                    .padding(6)
+                    .width(80),
+                text("Filesystem"),
                 pick_list(FsChoice::CREATE, Some(self.create_fs), Message::CreateFs),
             ]
             .spacing(8)
@@ -691,251 +1168,357 @@ impl App {
                 text("Hidden MiB"),
                 text_input("0 = none", &self.create_hidden_mb)
                     .on_input(Message::CreateHiddenMb)
-                    .padding(8)
-                    .width(120),
+                    .padding(6)
+                    .width(100),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
             text_input("Hidden password", &self.create_hidden_password)
                 .secure(true)
                 .on_input(Message::CreateHiddenPassword)
-                .padding(8),
+                .padding(6),
             checkbox("Wipe data area (slow)", self.create_wipe).on_toggle(Message::CreateWipe),
-            button("Create volume").on_press(Message::DoCreate),
+            cmd_button("Create", Message::DoCreate, self.busy),
         ]
-        .spacing(8)
+        .spacing(6)
         .into()
     }
 
-    fn view_mount(&self) -> Element<'_, Message> {
+    fn view_chpasswd_dialog(&self) -> Element<'_, Message> {
         column![
-            labeled_row(
-                "Container",
-                text_input("path.dc", &self.mount_path)
-                    .on_input(Message::MountPath)
-                    .padding(8),
-                button("Browse").on_press(Message::BrowseMountPath),
-            ),
-            labeled_row(
-                "Mountpoint",
-                text_input("./mnt", &self.mount_point)
-                    .on_input(Message::MountPoint)
-                    .padding(8),
-                button("Browse").on_press(Message::BrowseMountPoint),
-            ),
-            text_input("Password", &self.mount_password)
+            text("DC01 only. The master key and ciphertext stay. Take a header backup first.")
+                .size(12),
+            text_input("Current password", &self.cp_old)
                 .secure(true)
-                .on_input(Message::MountPassword)
-                .padding(8),
-            labeled_row(
-                "Keyfile",
-                text_input("optional, comma-separated", &self.mount_keyfile)
-                    .on_input(Message::MountKeyfile)
-                    .padding(8),
-                button("Browse").on_press(Message::BrowseMountKeyfile),
+                .on_input(Message::CpOld)
+                .padding(6),
+            text_input("New password", &self.cp_new)
+                .secure(true)
+                .on_input(Message::CpNew)
+                .padding(6),
+            text_input("Confirm new password", &self.cp_confirm)
+                .secure(true)
+                .on_input(Message::CpConfirm)
+                .padding(6),
+            labeled(
+                "Keyfiles",
+                text_input("current, optional", &self.cp_keyfile)
+                    .on_input(Message::CpKeyfile)
+                    .padding(6),
+                cmd_button("Browse", Message::BrowseCpKeyfile, self.busy),
             ),
-            row![
-                text("Mount ID"),
-                text_input("default", &self.mount_id)
-                    .on_input(Message::MountId)
-                    .padding(8)
-                    .width(140),
-                text("PIM"),
-                text_input("0", &self.mount_pim)
-                    .on_input(Message::MountPim)
-                    .padding(8)
-                    .width(80),
-                text("FS"),
-                pick_list(FsChoice::MOUNT, Some(self.mount_fs), Message::MountFs),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
-            checkbox("Protect hidden volume", self.mount_protect_hidden)
-                .on_toggle(Message::MountProtectHidden),
-            text_input(
-                "Hidden password (if protecting)",
-                &self.mount_hidden_password
-            )
-            .secure(true)
-            .on_input(Message::MountHiddenPassword)
-            .padding(8),
-            button("Mount").on_press(Message::DoMount),
-            text("Linux FAT mounts use checkout/checkin — dismount to sync writes.").size(12),
+            labeled(
+                "New keyfiles",
+                text_input("optional, defaults to current", &self.cp_new_keyfile)
+                    .on_input(Message::CpNewKeyfile)
+                    .padding(6),
+                cmd_button("Browse", Message::BrowseCpNewKeyfile, self.busy),
+            ),
+            cmd_button("OK", Message::DoChpasswd, self.busy),
         ]
-        .spacing(8)
+        .spacing(6)
         .into()
     }
 
-    fn view_dismount(&self) -> Element<'_, Message> {
+    fn view_header_dialog(&self, backup: bool) -> Element<'_, Message> {
+        let browse = if backup {
+            Message::BrowseHdrSave
+        } else {
+            Message::BrowseHdrOpen
+        };
+        let go = if backup {
+            Message::DoHeaderBackup
+        } else {
+            Message::DoHeaderRestore
+        };
         column![
-            text("No password or keyfile needed — use the mount id from when you mounted.")
-                .size(13),
-            row![
-                text("Mount ID"),
-                text_input("default", &self.dismount_id)
-                    .on_input(Message::DismountId)
-                    .padding(8)
-                    .width(200),
-            ]
-            .spacing(8)
-            .align_y(iced::Alignment::Center),
-            button("Dismount / unmount").on_press(Message::DoDismount),
-            text("Tip: on Status you can also click Dismount next to each active mount.").size(12),
+            text("Primary and hidden header slots only. Volume data is not copied.").size(12),
+            labeled(
+                "File",
+                text_input("header backup", &self.hdr_file)
+                    .on_input(Message::HdrFile)
+                    .padding(6),
+                cmd_button("Browse", browse, self.busy),
+            ),
+            cmd_button(if backup { "Backup" } else { "Restore" }, go, self.busy),
         ]
-        .spacing(8)
+        .spacing(6)
         .into()
     }
 
-    fn view_info(&self) -> Element<'_, Message> {
+    fn view_properties_dialog(&self) -> Element<'_, Message> {
         column![
-            labeled_row(
-                "Container",
-                text_input("path.dc", &self.info_path)
-                    .on_input(Message::InfoPath)
-                    .padding(8),
-                button("Browse").on_press(Message::BrowseInfoPath),
-            ),
+            text(if self.volume_path.is_empty() {
+                "Set the volume path on the main window first."
+            } else {
+                self.volume_path.as_str()
+            })
+            .size(13),
+            text("OK reports the cipher that opened this volume.").size(12),
             text_input("Password", &self.info_password)
                 .secure(true)
                 .on_input(Message::InfoPassword)
-                .padding(8),
-            labeled_row(
-                "Keyfile",
-                text_input("optional, comma-separated", &self.info_keyfile)
+                .padding(6),
+            labeled(
+                "Keyfiles",
+                text_input("optional", &self.info_keyfile)
                     .on_input(Message::InfoKeyfile)
-                    .padding(8),
-                button("Browse").on_press(Message::BrowseInfoKeyfile),
+                    .padding(6),
+                cmd_button("Browse", Message::BrowseInfoKeyfile, self.busy),
             ),
             row![
                 text("PIM"),
                 text_input("0", &self.info_pim)
                     .on_input(Message::InfoPim)
-                    .padding(8)
+                    .padding(6)
                     .width(80),
+                text("PKCS-5 PRF"),
+                pick_list(PrfChoice::ALL, Some(self.vc_prf), Message::VcPrf),
             ]
             .spacing(8)
             .align_y(iced::Alignment::Center),
-            button("Show info").on_press(Message::DoInfo),
+            cmd_button("OK", Message::DoInfo, self.busy),
         ]
-        .spacing(8)
+        .spacing(6)
         .into()
     }
 
-    fn view_status(&self) -> Element<'_, Message> {
-        let mut col = column![
-            text("Active mounts — dismount with one click (no password).").size(13),
-            button("Refresh mounts").on_press(Message::DoStatus),
-        ]
-        .spacing(8);
-
-        if self.status_mounts.is_empty() {
-            col = col.push(text("(no mounts)"));
-        } else {
-            for m in &self.status_mounts {
-                let id = m.id.clone();
-                col = col.push(
-                    row![
-                        column![
-                            text(format!("id: {}", m.id)).size(14),
-                            text(format!("{} · {}", m.backend, m.container)).size(12),
-                            text(m.mountpoint.as_str()).size(12),
-                        ]
-                        .spacing(2)
-                        .width(Length::Fill),
-                        button("Dismount")
-                            .on_press(Message::DoDismountId(id))
-                            .style(iced::widget::button::danger),
-                    ]
-                    .spacing(12)
-                    .align_y(iced::Alignment::Center),
-                );
-            }
-        }
-
-        col.into()
-    }
-
-    fn view_favorites(&self) -> Element<'_, Message> {
+    fn view_favorites_dialog(&self) -> Element<'_, Message> {
         column![
-            labeled_row(
+            text("Passwords are not stored with favorites.").size(12),
+            labeled(
                 "Path",
                 text_input("container", &self.fav_path)
                     .on_input(Message::FavPath)
-                    .padding(8),
-                button("Browse").on_press(Message::BrowseFavPath),
+                    .padding(6),
+                cmd_button("Browse", Message::BrowseFavPath, self.busy),
             ),
             text_input("Label", &self.fav_label)
                 .on_input(Message::FavLabel)
-                .padding(8),
-            checkbox("Automount", self.fav_automount).on_toggle(Message::FavAutomount),
+                .padding(6),
+            checkbox("Mount favorite on startup request", self.fav_automount)
+                .on_toggle(Message::FavAutomount),
             row![
-                button("List").on_press(Message::DoFavList),
-                button("Add").on_press(Message::DoFavAdd),
-                button("Remove").on_press(Message::DoFavRemove),
+                cmd_button("List", Message::DoFavList, self.busy),
+                cmd_button("Add", Message::DoFavAdd, self.busy),
+                cmd_button("Remove", Message::DoFavRemove, self.busy),
             ]
-            .spacing(8),
-            text("Favorites:"),
-            text(&self.fav_list),
+            .spacing(6),
+            text(&self.fav_list).size(13),
+            self.view_favorite_use_buttons(),
         ]
-        .spacing(8)
+        .spacing(6)
         .into()
     }
 
-    fn view_keywrap(&self) -> Element<'_, Message> {
+    fn view_favorite_use_buttons(&self) -> Element<'_, Message> {
+        let mut col = column![].spacing(2);
+        for line in self.fav_list.lines() {
+            let mut parts = line.split('\t');
+            let label = parts.next().unwrap_or("");
+            let path = parts.next().unwrap_or("");
+            if path.is_empty() || label.starts_with('(') {
+                continue;
+            }
+            let caption = format!("Use {label}");
+            let mut btn = button(text(caption).size(14))
+                .style(button::secondary)
+                .padding([6, 10]);
+            if !self.busy {
+                btn = btn.on_press(Message::UseFavorite(path.to_string()));
+            }
+            col = col.push(btn);
+        }
+        col.into()
+    }
+
+    fn view_keywrap_dialog(&self) -> Element<'_, Message> {
         column![
-            text("ML-KEM-768 key wrap (export path)").size(16),
-            labeled_row(
+            text("ML-KEM-768 wraps an exported key. It is not the disk cipher.").size(12),
+            labeled(
                 "EK",
                 text_input("ek.bin", &self.kw_ek)
                     .on_input(Message::KwEk)
-                    .padding(8),
-                button("Browse").on_press(Message::BrowseKwEk),
+                    .padding(6),
+                cmd_button("Browse", Message::BrowseKwEk, self.busy),
             ),
-            labeled_row(
+            labeled(
                 "DK",
                 text_input("dk.bin", &self.kw_dk)
                     .on_input(Message::KwDk)
-                    .padding(8),
-                button("Browse").on_press(Message::BrowseKwDk),
+                    .padding(6),
+                cmd_button("Browse", Message::BrowseKwDk, self.busy),
             ),
-            labeled_row(
+            labeled(
                 "In",
                 text_input("input", &self.kw_infile)
                     .on_input(Message::KwInfile)
-                    .padding(8),
-                button("Browse").on_press(Message::BrowseKwIn),
+                    .padding(6),
+                cmd_button("Browse", Message::BrowseKwIn, self.busy),
             ),
-            labeled_row(
+            labeled(
                 "Out",
                 text_input("output", &self.kw_outfile)
                     .on_input(Message::KwOutfile)
-                    .padding(8),
-                button("Browse").on_press(Message::BrowseKwOut),
+                    .padding(6),
+                cmd_button("Browse", Message::BrowseKwOut, self.busy),
             ),
             row![
-                button("Generate keypair").on_press(Message::DoKwGen),
-                button("Wrap").on_press(Message::DoKwWrap),
-                button("Unwrap").on_press(Message::DoKwUnwrap),
+                cmd_button("Generate keypair", Message::DoKwGen, self.busy),
+                cmd_button("Wrap", Message::DoKwWrap, self.busy),
+                cmd_button("Unwrap", Message::DoKwUnwrap, self.busy),
             ]
-            .spacing(8),
+            .spacing(6),
         ]
-        .spacing(8)
+        .spacing(6)
+        .into()
+    }
+
+    fn view_keyfile_dialog(&self) -> Element<'_, Message> {
+        column![
+            text("Random bytes, mode 0600. Not derived from the volume password.").size(12),
+            labeled(
+                "File",
+                text_input("keyfile.bin", &self.kf_path)
+                    .on_input(Message::KfPath)
+                    .padding(6),
+                cmd_button("Browse", Message::BrowseKfPath, self.busy),
+            ),
+            row![
+                text("Bytes"),
+                text_input("64", &self.kf_bytes)
+                    .on_input(Message::KfBytes)
+                    .padding(6)
+                    .width(100),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+            cmd_button("Generate", Message::DoKeyfile, self.busy),
+        ]
+        .spacing(6)
+        .into()
+    }
+
+    fn view_bench_dialog(&self) -> Element<'_, Message> {
+        column![
+            text("Times Argon2id header-key derivation on this machine. Does not touch a volume.")
+                .size(12),
+            cmd_button("Time DC01 defaults", Message::DoBenchDc01, self.busy),
+            row![
+                text("VeraCrypt PIM"),
+                text_input("0", &self.bench_pim)
+                    .on_input(Message::BenchPim)
+                    .padding(6)
+                    .width(80),
+                cmd_button("Time this PIM", Message::DoBenchPim, self.busy),
+            ]
+            .spacing(8)
+            .align_y(iced::Alignment::Center),
+            text("PIM 0 is VeraCrypt's default PIM 12 and can take a while.").size(12),
+        ]
+        .spacing(6)
+        .into()
+    }
+
+    fn view_about_dialog(&self) -> Element<'_, Message> {
+        column![
+            text("DeviceCryptor").size(18),
+            text("Experimental encrypted containers. Not independently audited.").size(13),
+            text("Do not use it for irreplaceable data.").size(13),
+            text("Native format DC01: AES-256-XTS, Argon2id, BLAKE3 header MAC.").size(13),
+            text("Compat mount: some VeraCrypt/TrueCrypt volumes on the AES-XTS path only.")
+                .size(13),
+            text("ML-KEM-768 is an optional key-export wrap, not a disk cipher.").size(13),
+            text("This window follows the classic VeraCrypt layout. It is not VeraCrypt.").size(13),
+            text("Apache-2.0 · Vassbrekke AS").size(12),
+        ]
+        .spacing(4)
         .into()
     }
 }
 
-fn labeled_row<'a>(
+fn menu_button<'a>(
+    label: &'a str,
+    menu: Menu,
+    open: Option<Menu>,
+    busy: bool,
+) -> Element<'a, Message> {
+    let mut btn = button(text(label).size(14)).padding([4, 10]);
+    btn = if open == Some(menu) {
+        btn.style(button::primary)
+    } else {
+        btn.style(button::secondary)
+    };
+    if !busy {
+        btn = btn.on_press(Message::ToggleMenu(menu));
+    }
+    btn.into()
+}
+
+fn cmd_button<'a>(label: &'a str, msg: Message, busy: bool) -> Element<'a, Message> {
+    let btn = button(text(label).size(14))
+        .style(button::secondary)
+        .padding([6, 10]);
+    if busy {
+        btn.into()
+    } else {
+        btn.on_press(msg).into()
+    }
+}
+
+fn cell<'a>(s: impl Into<String>, width: f32) -> Element<'a, Message> {
+    text(s.into()).size(13).width(width).into()
+}
+
+fn labeled<'a>(
     label: &'a str,
     field: impl Into<Element<'a, Message>>,
     browse: impl Into<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     row![text(label).width(90), field.into(), browse.into()]
-        .spacing(8)
+        .spacing(6)
         .align_y(iced::Alignment::Center)
         .into()
 }
 
-/// Load keyfiles. Paths may be comma- or colon-separated (CLI allows repeated `--keyfile`).
+fn shorten(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
+fn type_label(m: &StatusRow) -> String {
+    let base = if m.backend.is_empty() || m.backend == "fat-checkout" {
+        m.fs.clone()
+    } else {
+        format!("{} {}", m.fs, m.backend)
+    };
+    if m.session_store == "keyring" {
+        format!("{base}·kr")
+    } else {
+        base
+    }
+}
+
+fn slot_id(n: u8) -> String {
+    format!("slot{n}")
+}
+
+fn is_slot_id(id: &str) -> bool {
+    id.strip_prefix("slot")
+        .and_then(|n| n.parse::<u8>().ok())
+        .is_some_and(|n| (1..=SLOT_COUNT).contains(&n))
+}
+
+fn default_mountpoint(slot: u8) -> String {
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    format!("{home}/dc-mnt/slot{slot}")
+}
+
 fn load_keyfiles(paths: &str) -> anyhow::Result<Vec<Vec<u8>>> {
     let mut out = Vec::new();
     for part in paths.split([',', ':']) {
@@ -955,9 +1538,48 @@ fn parse_pim(s: &str) -> anyhow::Result<i32> {
     Ok(s.trim().parse()?)
 }
 
+fn write_keyfile(path: &std::path::Path, bytes: &str) -> anyhow::Result<String> {
+    let n: u32 = bytes
+        .trim()
+        .parse()
+        .map_err(|_| anyhow::anyhow!("bytes must be a number"))?;
+    if n == 0 || n > 1024 * 1024 {
+        anyhow::bail!("bytes must be 1..=1048576");
+    }
+    if path.as_os_str().is_empty() {
+        anyhow::bail!("path required");
+    }
+    let mut buf = vec![0u8; n as usize];
+    fill_random(&mut buf).map_err(|e| anyhow::anyhow!("rng: {e}"))?;
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent)?;
+        }
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        f.write_all(&buf)?;
+        f.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, &buf)?;
+    }
+    buf.zeroize();
+    Ok(format!("wrote keyfile {} ({} bytes)", path.display(), n))
+}
+
 struct CreateSnap {
     path: PathBuf,
     password: String,
+    confirm: String,
     size_mb: String,
     fs: FsChoice,
     keyfile: String,
@@ -969,8 +1591,9 @@ struct CreateSnap {
 impl From<&App> for CreateSnap {
     fn from(a: &App) -> Self {
         Self {
-            path: PathBuf::from(&a.create_path),
+            path: PathBuf::from(&a.volume_path),
             password: a.create_password.clone(),
+            confirm: a.create_confirm.clone(),
             size_mb: a.create_size_mb.clone(),
             fs: a.create_fs,
             keyfile: a.create_keyfile.clone(),
@@ -986,8 +1609,11 @@ impl CreateSnap {
         if self.password.is_empty() {
             anyhow::bail!("password required");
         }
+        if self.password != self.confirm {
+            anyhow::bail!("passwords do not match");
+        }
         if self.path.as_os_str().is_empty() {
-            anyhow::bail!("path required");
+            anyhow::bail!("set the volume path on the main window first");
         }
         let mb: u64 = if self.size_mb.trim().is_empty() {
             16
@@ -1008,14 +1634,12 @@ impl CreateSnap {
             parallelism: DC01_DEFAULT_PARALLELISM,
             sparse: !self.wipe,
         };
-
         let hidden_mb: Option<u64> =
             if self.hidden_mb.trim().is_empty() || self.hidden_mb.trim() == "0" {
                 None
             } else {
                 Some(self.hidden_mb.trim().parse::<u64>()?)
             };
-
         if let Some(hmb) = hidden_mb {
             if self.hidden_password.is_empty() {
                 anyhow::bail!("hidden password required when hidden size is set");
@@ -1025,7 +1649,6 @@ impl CreateSnap {
         } else {
             create_container(&self.path, &opts)?;
         }
-
         #[cfg(target_os = "linux")]
         {
             let fs_ty = self.fs.as_fs_type();
@@ -1036,6 +1659,7 @@ impl CreateSnap {
                         password: self.password.as_bytes(),
                         keyfiles: &kf_refs,
                         pim: 0,
+                        prf: None,
                         protect_hidden: false,
                         hidden_password: None,
                     },
@@ -1048,6 +1672,7 @@ impl CreateSnap {
                             password: self.hidden_password.as_bytes(),
                             keyfiles: &kf_refs,
                             pim: 0,
+                            prf: None,
                             protect_hidden: false,
                             hidden_password: None,
                         },
@@ -1056,7 +1681,6 @@ impl CreateSnap {
                 }
             }
         }
-
         Ok(format!(
             "created {} (fs={}, wipe={})",
             self.path.display(),
@@ -1072,23 +1696,27 @@ struct MountSnap {
     password: String,
     keyfile: String,
     pim: String,
+    prf: PrfChoice,
     id: String,
     fs: FsChoice,
     protect_hidden: bool,
+    live: bool,
     hidden_password: String,
 }
 
 impl From<&App> for MountSnap {
     fn from(a: &App) -> Self {
         Self {
-            path: PathBuf::from(&a.mount_path),
+            path: PathBuf::from(&a.volume_path),
             mountpoint: PathBuf::from(&a.mount_point),
             password: a.mount_password.clone(),
             keyfile: a.mount_keyfile.clone(),
             pim: a.mount_pim.clone(),
-            id: a.mount_id.clone(),
+            prf: a.vc_prf,
+            id: slot_id(a.selected_slot),
             fs: a.mount_fs,
             protect_hidden: a.mount_protect_hidden,
+            live: a.mount_live,
             hidden_password: a.mount_hidden_password.clone(),
         }
     }
@@ -1100,23 +1728,18 @@ impl MountSnap {
             anyhow::bail!("password required");
         }
         if self.path.as_os_str().is_empty() || self.mountpoint.as_os_str().is_empty() {
-            anyhow::bail!("container and mountpoint required");
+            anyhow::bail!("volume and mount directory required");
         }
         let kfs = load_keyfiles(&self.keyfile)?;
         let kf_refs: Vec<&[u8]> = kfs.iter().map(|v| v.as_slice()).collect();
         let pim = parse_pim(&self.pim)?;
-        let id = if self.id.trim().is_empty() {
-            "default".into()
-        } else {
-            self.id
-        };
-
         #[cfg(target_os = "linux")]
         {
             let open = OpenOptions {
                 password: self.password.as_bytes(),
                 keyfiles: &kf_refs,
                 pim,
+                prf: self.prf.as_prf(),
                 protect_hidden: self.protect_hidden,
                 hidden_password: if self.protect_hidden {
                     Some(self.hidden_password.as_bytes())
@@ -1127,23 +1750,34 @@ impl MountSnap {
             let st = linux_mount(
                 &self.path,
                 &LinuxMountOptions {
-                    id: &id,
+                    id: &self.id,
                     mountpoint: &self.mountpoint,
                     open,
                     fs_hint: self.fs.as_fs_type(),
+                    live: self.live,
                 },
             )?;
             Ok(format!(
-                "mounted {} → {} (backend={}, id={})",
+                "mounted {} → {} (backend={}, encryption={}, id={}, session={})",
                 self.path.display(),
                 self.mountpoint.display(),
                 st.backend,
-                st.id
+                if st.cipher.is_empty() {
+                    "unknown"
+                } else {
+                    st.cipher.as_str()
+                },
+                st.id,
+                if st.session_store.is_empty() {
+                    "file"
+                } else {
+                    st.session_store.as_str()
+                }
             ))
         }
         #[cfg(not(target_os = "linux"))]
         {
-            let _ = (kf_refs, pim, id, self.fs, self.protect_hidden);
+            let _ = (kf_refs, pim, self.fs, self.protect_hidden);
             anyhow::bail!("mount is implemented for Linux first");
         }
     }
@@ -1151,7 +1785,7 @@ impl MountSnap {
 
 fn run_dismount(id: &str) -> anyhow::Result<String> {
     let id = if id.trim().is_empty() {
-        "default"
+        "slot1"
     } else {
         id.trim()
     };
@@ -1167,6 +1801,25 @@ fn run_dismount(id: &str) -> anyhow::Result<String> {
     }
 }
 
+fn run_dismount_all() -> anyhow::Result<String> {
+    #[cfg(target_os = "linux")]
+    {
+        let rows = load_status_rows()?;
+        if rows.is_empty() {
+            return Ok("no volumes mounted".into());
+        }
+        let n = rows.len();
+        for row in rows {
+            linux_dismount(&row.id)?;
+        }
+        Ok(format!("dismounted {n}"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        anyhow::bail!("dismount is implemented for Linux first");
+    }
+}
+
 fn load_status_rows() -> anyhow::Result<Vec<StatusRow>> {
     #[cfg(target_os = "linux")]
     {
@@ -1178,6 +1831,8 @@ fn load_status_rows() -> anyhow::Result<Vec<StatusRow>> {
                 backend: st.backend,
                 container: st.container.display().to_string(),
                 mountpoint: st.mountpoint.display().to_string(),
+                fs: st.fs,
+                session_store: st.session_store,
             })
             .collect())
     }
@@ -1192,15 +1847,17 @@ struct InfoSnap {
     password: String,
     keyfile: String,
     pim: String,
+    prf: PrfChoice,
 }
 
 impl From<&App> for InfoSnap {
     fn from(a: &App) -> Self {
         Self {
-            path: PathBuf::from(&a.info_path),
+            path: PathBuf::from(&a.volume_path),
             password: a.info_password.clone(),
             keyfile: a.info_keyfile.clone(),
             pim: a.info_pim.clone(),
+            prf: a.vc_prf,
         }
     }
 }
@@ -1209,6 +1866,9 @@ impl InfoSnap {
     fn run(self) -> anyhow::Result<String> {
         if self.password.is_empty() {
             anyhow::bail!("password required");
+        }
+        if self.path.as_os_str().is_empty() {
+            anyhow::bail!("set the volume path on the main window first");
         }
         let kfs = load_keyfiles(&self.keyfile)?;
         let kf_refs: Vec<&[u8]> = kfs.iter().map(|v| v.as_slice()).collect();
@@ -1219,16 +1879,81 @@ impl InfoSnap {
                 password: self.password.as_bytes(),
                 keyfiles: &kf_refs,
                 pim,
+                prf: self.prf.as_prf(),
                 protect_hidden: false,
                 hidden_password: None,
             },
         )?;
         let msg = format!(
-            "kind: {:?}\nsector_size: {}\ndata_offset: {}\ndata_length: {}\nhidden: {}",
-            vol.kind, vol.sector_size, vol.data_offset, vol.data_length, vol.is_hidden
+            "kind: {:?}\nencryption: {}\nsector_size: {}\ndata_offset: {}\ndata_length: {}\nhidden: {}",
+            vol.kind,
+            vol.cipher.label(),
+            vol.sector_size,
+            vol.data_offset,
+            vol.data_length,
+            vol.is_hidden
         );
         dismount_session(vol);
         Ok(msg)
+    }
+}
+
+struct ChpasswdSnap {
+    path: PathBuf,
+    old: String,
+    new: String,
+    confirm: String,
+    keyfile: String,
+    new_keyfile: String,
+}
+
+impl From<&App> for ChpasswdSnap {
+    fn from(a: &App) -> Self {
+        Self {
+            path: PathBuf::from(&a.volume_path),
+            old: a.cp_old.clone(),
+            new: a.cp_new.clone(),
+            confirm: a.cp_confirm.clone(),
+            keyfile: a.cp_keyfile.clone(),
+            new_keyfile: a.cp_new_keyfile.clone(),
+        }
+    }
+}
+
+impl ChpasswdSnap {
+    fn run(self) -> anyhow::Result<String> {
+        if self.path.as_os_str().is_empty() {
+            anyhow::bail!("set the volume path on the main window first");
+        }
+        if self.old.is_empty() || self.new.is_empty() {
+            anyhow::bail!("current and new passwords required");
+        }
+        if self.new != self.confirm {
+            anyhow::bail!("new passwords do not match");
+        }
+        let kfs = load_keyfiles(&self.keyfile)?;
+        let kf_refs: Vec<&[u8]> = kfs.iter().map(|v| v.as_slice()).collect();
+        let new_src = if self.new_keyfile.trim().is_empty() {
+            self.keyfile.clone()
+        } else {
+            self.new_keyfile.clone()
+        };
+        let new_kfs = load_keyfiles(&new_src)?;
+        let new_refs: Vec<&[u8]> = new_kfs.iter().map(|v| v.as_slice()).collect();
+        change_password(
+            &self.path,
+            &OpenOptions {
+                password: self.old.as_bytes(),
+                keyfiles: &kf_refs,
+                pim: 0,
+                prf: None,
+                protect_hidden: false,
+                hidden_password: None,
+            },
+            self.new.as_bytes(),
+            &new_refs,
+        )?;
+        Ok(format!("password changed on {}", self.path.display()))
     }
 }
 

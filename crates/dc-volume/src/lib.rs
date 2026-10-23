@@ -4,6 +4,8 @@ mod cursor;
 mod favorites;
 mod fstype;
 #[cfg(target_os = "linux")]
+mod fuse_fat;
+#[cfg(target_os = "linux")]
 mod linux_mount;
 mod maintain;
 mod session;
@@ -13,9 +15,9 @@ pub use favorites::{add_favorite, list_favorites, remove_favorite, Favorite};
 pub use fstype::FsType;
 pub use maintain::{backup_headers, change_password, restore_headers};
 pub use session::{
-    create_container, create_container_with_hidden, dismount_session, open_container,
-    open_with_master_key, read_sectors, write_sectors, CreateOptions, MountedVolume, OpenOptions,
-    VolumeKind,
+    create_container, create_container_with_hidden, create_container_with_hidden_progress,
+    create_container_with_progress, dismount_session, open_container, open_with_master_key,
+    read_sectors, write_sectors, CreateOptions, MountedVolume, OpenOptions, VolumeKind,
 };
 
 #[cfg(target_os = "linux")]

@@ -19,4 +19,5 @@ iced = { version = "0.13", default-features = true, features = ["tokio"] }
 rfd = "0.15"
 anyhow = { workspace = true }
 serde_json = { workspace = true }
+zeroize = { workspace = true }
 tokio = { version = "1", features = ["rt", "macros"] }

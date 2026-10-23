@@ -5,14 +5,17 @@
 //! - **Mount** requires password and optional keyfile(s).
 //! - **Dismount** needs only the mount id — credentials are not re-prompted.
 //!
-//! While mounted, the unlocked master key is held in a user-private session file
-//! (`~/.local/state/devicecryptor/<id>.session`, mode 0600) so checkin can re-open
-//! the container without the password. The session file is wiped on dismount.
+//! While mounted, the unlocked master key is held in the user kernel keyring when
+//! `keyctl` can store and read it back (`keyctl padd` on stdin — never on argv).
+//! A mode-0600 marker file (`DCSESSKR`) records that choice. If the keyring is
+//! unavailable, the key falls back to `~/.local/state/devicecryptor/<id>.session`
+//! (mode 0600). Either store is wiped on dismount so checkin can re-open the
+//! container without the password.
 
 use std::fs::{self, File};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use fatfs::{FileSystem, FsOptions};
@@ -38,11 +41,119 @@ pub struct MountState {
     pub pid: u32,
     pub fs: String,
     pub protect_hidden: u64,
+    /// `keyring` or `file`. Empty on states written before session-store tracking.
+    #[serde(default)]
+    pub session_store: String,
+    /// Disk cipher label. Empty on states written before cipher tracking.
+    #[serde(default)]
+    pub cipher: String,
 }
 
 const SESSION_MAGIC: &[u8; 8] = b"DCSESS01";
+const SESSION_KEYRING_MARK: &[u8; 8] = b"DCSESSKR";
 const SESSION_KIND_DC01: u8 = 0;
 const SESSION_KIND_VC: u8 = 1;
+
+fn keyring_desc(id: &str) -> Option<String> {
+    if id.is_empty() || id.len() > 64 {
+        return None;
+    }
+    if !id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+    {
+        return None;
+    }
+    Some(format!("devicecryptor-session-{id}"))
+}
+
+fn keyring_purge(desc: &str) {
+    let _ = Command::new("keyctl")
+        .args(["purge", "-s", "@u", "user", desc])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+fn keyring_write(desc: &str, blob: &[u8]) -> Result<(), VolumeError> {
+    let mut child = Command::new("keyctl")
+        .args(["padd", "user", desc, "@u"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| VolumeError::Platform(format!("keyctl: {e}")))?;
+    {
+        let mut stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| VolumeError::Platform("keyctl stdin unavailable".into()))?;
+        stdin.write_all(blob)?;
+    }
+    let out = child
+        .wait_with_output()
+        .map_err(|e| VolumeError::Platform(format!("keyctl: {e}")))?;
+    if !out.status.success() {
+        return Err(VolumeError::Platform(format!(
+            "keyctl padd failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(())
+}
+
+fn keyring_read(desc: &str) -> Result<Vec<u8>, VolumeError> {
+    let req = Command::new("keyctl")
+        .args(["request", "user", desc, "@u"])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| VolumeError::Platform(format!("keyctl: {e}")))?;
+    if !req.status.success() {
+        return Err(VolumeError::Invalid(
+            "mount session key missing from kernel keyring — remount the volume",
+        ));
+    }
+    let id = String::from_utf8_lossy(&req.stdout).trim().to_string();
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(VolumeError::Format("unexpected keyctl id".into()));
+    }
+    let piped = Command::new("keyctl")
+        .args(["pipe", &id])
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| VolumeError::Platform(format!("keyctl: {e}")))?;
+    if !piped.status.success() {
+        return Err(VolumeError::Platform(
+            "keyctl pipe failed while reading session key".into(),
+        ));
+    }
+    Ok(piped.stdout)
+}
+
+fn try_store_keyring(id: &str, blob: &[u8]) -> Result<(), VolumeError> {
+    let desc = keyring_desc(id).ok_or(VolumeError::Invalid("mount id cannot use keyring"))?;
+    keyring_purge(&desc);
+    keyring_write(&desc, blob)?;
+    let got = keyring_read(&desc)?;
+    if got != blob {
+        keyring_purge(&desc);
+        return Err(VolumeError::Platform(
+            "kernel keyring read-back did not match".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn session_store_of(id: &str) -> String {
+    let Ok(p) = session_path(id) else {
+        return "file".into();
+    };
+    match fs::read(p) {
+        Ok(data) if data.starts_with(SESSION_KEYRING_MARK) => "keyring".into(),
+        _ => "file".into(),
+    }
+}
 
 fn state_dir() -> Result<PathBuf, VolumeError> {
     let dir = default_mount_state_dir().map_err(|e| VolumeError::Platform(e.to_string()))?;
@@ -107,7 +218,8 @@ fn remove_mount_state(id: &str) -> Result<(), VolumeError> {
     Ok(())
 }
 
-/// Persist unlocked master key for passwordless dismount (mode 0600).
+/// Persist unlocked master key for passwordless dismount.
+/// Prefers the user kernel keyring; falls back to a mode-0600 session file.
 fn save_session_key(id: &str, vol: &MountedVolume) -> Result<(), VolumeError> {
     let key = vol.master_key_bytes();
     if key.len() != 64 {
@@ -126,6 +238,22 @@ fn save_session_key(id: &str, vol: &MountedVolume) -> Result<(), VolumeError> {
     blob.extend_from_slice(&vol.data_offset.to_le_bytes());
     blob.extend_from_slice(&vol.data_length.to_le_bytes());
     blob.extend_from_slice(key);
+
+    if keyring_desc(id).is_some() && try_store_keyring(id, &blob).is_ok() {
+        match write_private_file(&p, SESSION_KEYRING_MARK) {
+            Ok(()) => {
+                blob.zeroize();
+                return Ok(());
+            }
+            Err(e) => {
+                if let Some(desc) = keyring_desc(id) {
+                    keyring_purge(&desc);
+                }
+                blob.zeroize();
+                return Err(e);
+            }
+        }
+    }
 
     write_private_file(&p, &blob)?;
     blob.zeroize();
@@ -155,25 +283,36 @@ fn load_session_key(id: &str) -> Result<SessionMaterial, VolumeError> {
         ));
     }
     let mut data = fs::read(&p)?;
+    if data.starts_with(SESSION_KEYRING_MARK) {
+        data.zeroize();
+        let desc = keyring_desc(id).ok_or(VolumeError::Invalid(
+            "mount id cannot be read from the kernel keyring",
+        ))?;
+        let mut blob = keyring_read(&desc)?;
+        let parsed = parse_session_blob(&mut blob);
+        blob.zeroize();
+        return parsed;
+    }
+    let parsed = parse_session_blob(&mut data);
+    data.zeroize();
+    parsed
+}
+
+fn parse_session_blob(data: &mut [u8]) -> Result<SessionMaterial, VolumeError> {
     const MIN: usize = 8 + 1 + 1 + 4 + 8 + 8 + 64;
     if data.len() < MIN || &data[..8] != SESSION_MAGIC {
-        data.zeroize();
         return Err(VolumeError::Format("corrupt mount session file".into()));
     }
     let kind = match data[8] {
         SESSION_KIND_DC01 => VolumeKind::Dc01,
         SESSION_KIND_VC => VolumeKind::VeraCrypt,
-        _ => {
-            data.zeroize();
-            return Err(VolumeError::Format("unknown session volume kind".into()));
-        }
+        _ => return Err(VolumeError::Format("unknown session volume kind".into())),
     };
     let is_hidden = data[9] != 0;
     let sector_size = u32::from_le_bytes(data[10..14].try_into().unwrap());
     let data_offset = u64::from_le_bytes(data[14..22].try_into().unwrap());
     let data_length = u64::from_le_bytes(data[22..30].try_into().unwrap());
     let master = data[30..94].to_vec();
-    data.zeroize();
     Ok(SessionMaterial {
         kind,
         is_hidden,
@@ -185,6 +324,9 @@ fn load_session_key(id: &str) -> Result<SessionMaterial, VolumeError> {
 }
 
 fn wipe_session_key(id: &str) -> Result<(), VolumeError> {
+    if let Some(desc) = keyring_desc(id) {
+        keyring_purge(&desc);
+    }
     let p = session_path(id)?;
     if p.exists() {
         // Overwrite then remove so key material is not left in free space casually.
@@ -323,6 +465,8 @@ pub struct LinuxMountOptions<'a> {
     pub mountpoint: &'a Path,
     pub open: OpenOptions<'a>,
     pub fs_hint: FsType,
+    /// Write through a FUSE mount. The process must stay alive.
+    pub live: bool,
 }
 
 fn resolve_hidden_protect(container: &Path, opts: &OpenOptions<'_>) -> u64 {
@@ -338,6 +482,7 @@ fn resolve_hidden_protect(container: &Path, opts: &OpenOptions<'_>) -> u64 {
             password: hp,
             keyfiles: opts.keyfiles,
             pim: opts.pim,
+            prf: opts.prf,
             protect_hidden: false,
             hidden_password: None,
         },
@@ -391,9 +536,39 @@ pub fn linux_mount(
     };
 
     match fs {
+        FsType::Fat32 if opts.live => mount_fat_live(container, vol, opts, protect),
         FsType::Fat32 => mount_fat_checkout(container, vol, opts, protect),
         FsType::Ext4 | FsType::None => mount_loop(container, vol, opts, fs),
     }
+}
+
+fn mount_fat_live(
+    container: &Path,
+    vol: Arc<Mutex<MountedVolume>>,
+    opts: &LinuxMountOptions<'_>,
+    protect: u64,
+) -> Result<MountState, VolumeError> {
+    let cipher = vol.lock().unwrap().cipher.label().to_string();
+    let session = crate::fuse_fat::spawn_live(vol, protect, opts.mountpoint)?;
+    crate::fuse_fat::keep_live(opts.id, session);
+    let st = MountState {
+        id: opts.id.to_string(),
+        container: container.to_path_buf(),
+        mountpoint: opts.mountpoint.to_path_buf(),
+        backend: "fat-fuse".into(),
+        loop_dev: None,
+        raw_path: None,
+        pid: std::process::id(),
+        fs: "fat32".into(),
+        protect_hidden: protect,
+        session_store: String::new(),
+        cipher,
+    };
+    if let Err(e) = save_mount_state(&st) {
+        crate::fuse_fat::drop_live(opts.id);
+        return Err(e);
+    }
+    Ok(st)
 }
 
 fn mount_fat_checkout(
@@ -428,6 +603,8 @@ fn mount_fat_checkout(
         pid: std::process::id(),
         fs: "fat32".into(),
         protect_hidden: protect,
+        session_store: session_store_of(opts.id),
+        cipher: vol.lock().unwrap().cipher.label().to_string(),
     };
     if let Err(e) = save_mount_state(&st) {
         let _ = wipe_session_key(opts.id);
@@ -549,6 +726,7 @@ fn mount_loop(
     let dir = state_dir()?;
     let raw = dir.join(format!("{}.raw", opts.id));
     export_raw_image(Arc::clone(&vol), &raw)?;
+    let cipher = vol.lock().unwrap().cipher.label().to_string();
     drop(vol);
 
     let out = Command::new("losetup")
@@ -592,6 +770,8 @@ fn mount_loop(
         pid: std::process::id(),
         fs: fstype.into(),
         protect_hidden: 0,
+        session_store: session_store_of(opts.id),
+        cipher,
     };
     save_mount_state(&st)?;
     Ok(st)
@@ -604,6 +784,15 @@ fn mount_loop(
 pub fn linux_dismount(id: &str) -> Result<(), VolumeError> {
     let st = load_mount_state(id)?.ok_or(VolumeError::Invalid("not mounted"))?;
     match st.backend.as_str() {
+        "fat-fuse" => {
+            crate::fuse_fat::drop_live(id);
+            let _ = Command::new("fusermount3")
+                .args(["-u", &st.mountpoint.display().to_string()])
+                .status();
+            let _ = Command::new("fusermount")
+                .args(["-u", &st.mountpoint.display().to_string()])
+                .status();
+        }
         "fat-checkout" => {
             let _ = fs::remove_file(st.mountpoint.join(".devicecryptor-mount"));
             let mut vol = open_from_session(&st.container, id)?;
@@ -638,4 +827,37 @@ pub fn linux_dismount(id: &str) -> Result<(), VolumeError> {
     wipe_session_key(id)?;
     remove_mount_state(id)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn keyring_desc_rejects_unsafe_ids() {
+        assert!(keyring_desc("slot1").is_some());
+        assert!(keyring_desc("slot-1").is_some());
+        assert!(keyring_desc("").is_none());
+        assert!(keyring_desc("slot 1").is_none());
+        assert!(keyring_desc("../x").is_none());
+    }
+
+    #[test]
+    fn keyring_roundtrip_when_available() {
+        let desc = "devicecryptor-session-dctest";
+        let blob = b"DCSESS01-test-blob-not-a-real-key!!";
+        if keyring_write(desc, blob).is_err() {
+            return;
+        }
+        let got = keyring_read(desc);
+        keyring_purge(desc);
+        let got = got.expect("read-back");
+        assert_eq!(got, blob);
+    }
+
+    #[test]
+    fn parse_session_blob_rejects_short() {
+        let mut data = b"DCSESS01".to_vec();
+        assert!(parse_session_blob(&mut data).is_err());
+    }
 }

@@ -10,14 +10,12 @@ cargo test -p dc-crypto -p dc-format -p dc-volume -p dc-platform -p dc-cli -- --
 
 | Crate | Coverage |
 |-------|----------|
-| `dc-crypto` | AES-256-XTS encrypt/decrypt roundtrip; Argon2id PIM → (time, memory) vs VeraCrypt `get_argon2_params` table; ML-KEM-768 wrap/unwrap roundtrip |
+| `dc-crypto` | AES-256-XTS roundtrip and a Python `cryptography` sector-0 vector; random sector sizes; Argon2id PIM table; ML-KEM-768 NIST ACVP keygen and encapsulation |
 | `dc-format` | DC01 header create/open; wrong password fails closed; password reseal keeps master key |
 | `dc-volume` | Session/open smoke; header backup/restore + `chpasswd` |
 | `dc-cli` | Size parser |
 
-AES-XTS and ML-KEM tests are **self-consistency** only. They do not compare ciphertext to a second implementation.
-
-Extracted VeraCrypt constants (geometry, PIM, PBKDF2 iteration formula): [TEST_VECTORS.md](TEST_VECTORS.md). Golden `.hc` files are not in the tree yet (`tests/goldens/`).
+AES-256-XTS sector 0 is checked against Python `cryptography` 50.0.1. ML-KEM-768 keygen and encapsulation are checked against NIST ACVP FIPS203. Vendor `.hc` samples live under `vendor/VeraCrypt/Tests/` (see `tests/goldens/README.md`).
 
 ## Linux end-to-end
 
@@ -27,23 +25,16 @@ Extracted VeraCrypt constants (geometry, PIM, PBKDF2 iteration formula): [TEST_V
 
 Unprivileged FAT checkout/checkin: create, write, remount, wrong password, hidden volume, header backup, `chpasswd`, restore. Details: [LINUX_TESTING.md](LINUX_TESTING.md).
 
-Not covered: live kernel mounts, crash during checkin, bit-flipped containers, Windows.
+Not covered: crash during checkin, Windows.
 
-## Fuzzing (header parse)
+## Fuzzing
 
-Requires [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) and a nightly toolchain.
-
-```bash
-cargo install cargo-fuzz
-cargo +nightly fuzz run header_parse
-```
-
-Target: `fuzz/fuzz_targets/header_parse.rs`. It feeds 512-byte prefixes into `open_dc01_header` and `try_open_veracrypt_header` with a **fixed** password (`b"fuzz"`). Goal: no panic on malformed headers.
-
-Not in CI. No published corpus or crash triage policy yet. Sector I/O, KDF, and ML-KEM wrap are not fuzzed.
-
-Reproduce a crash (when you have one):
+Requires [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) and a nightly toolchain. Not in CI. No crash triage policy yet.
 
 ```bash
-cargo +nightly fuzz run header_parse fuzz/artifacts/header_parse/<crash-id>
+cargo +nightly fuzz run sector_xts
 ```
+
+`sector_xts` encrypts and decrypts aligned slices. It does not derive a password key.
+
+`header_parse` still calls the real header open with password `fuzz`. That pays a full KDF on every input, including Argon2id when the PRF is left on auto. Do not put that target in CI.

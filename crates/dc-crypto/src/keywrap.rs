@@ -98,4 +98,55 @@ mod tests {
         let out = mlkem_decapsulate_key(&dk, &wrapped).unwrap();
         assert_eq!(&out[..], msg);
     }
+
+    /// NIST ACVP ML-KEM-768 keyGen FIPS203, tcId 26 (commit 65370b8).
+    #[test]
+    fn mlkem768_keygen_matches_nist_acvp() {
+        use ml_kem::B32;
+        use sha2::{Digest, Sha256};
+
+        let d = B32::from(hex32("E34A701C4C87582F42264EE422D3C684D97611F2523EFE0C998AF05056D693DC"));
+        let z = B32::from(hex32("A85768F3486BD32A01BF9A8F21EA938E648EAE4E5448C34C3EB88820B159EEDD"));
+        let (dk, ek) = MlKem768::generate_deterministic(&d, &z);
+        assert_eq!(
+            hex::encode(Sha256::digest(ek.as_bytes())),
+            "7799c9d8eef172aa78c073514f2f039c240de8c5cb61bca82ba0bc46041ce279"
+        );
+        assert_eq!(
+            hex::encode(Sha256::digest(dk.as_bytes())),
+            "104b3444c3de2b81143788d27e17648f45c80f617f906156db2258da96dead40"
+        );
+    }
+
+    /// NIST ACVP ML-KEM-768 encapsulation, FIPS203 tcId 26.
+    #[test]
+    fn mlkem768_encap_matches_nist_acvp() {
+        use ::kem::Decapsulate;
+        use ml_kem::{B32, EncapsulateDeterministic};
+
+        let case: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/mlkem768-acvp-encap.json")).unwrap();
+        let ek_bytes = hex::decode(case["ek"].as_str().unwrap()).unwrap();
+        let dk_bytes = hex::decode(case["dk"].as_str().unwrap()).unwrap();
+        let m_bytes = hex::decode(case["m"].as_str().unwrap()).unwrap();
+        let c_bytes = hex::decode(case["c"].as_str().unwrap()).unwrap();
+        let k_bytes = hex::decode(case["k"].as_str().unwrap()).unwrap();
+
+        type Ek = <MlKem768 as KemCore>::EncapsulationKey;
+        type Dk = <MlKem768 as KemCore>::DecapsulationKey;
+        let ek = Ek::from_bytes(&ml_kem::array::Array::try_from(ek_bytes.as_slice()).unwrap());
+        let dk = Dk::from_bytes(&ml_kem::array::Array::try_from(dk_bytes.as_slice()).unwrap());
+        let m_arr: [u8; 32] = m_bytes.as_slice().try_into().unwrap();
+        let m = B32::from(m_arr);
+        let (ct, shared) = ek.encapsulate_deterministic(&m).unwrap();
+        assert_eq!(ct.as_slice(), c_bytes.as_slice());
+        assert_eq!(shared.as_slice(), k_bytes.as_slice());
+        let opened = dk.decapsulate(&ct).unwrap();
+        assert_eq!(opened.as_slice(), k_bytes.as_slice());
+    }
+
+    fn hex32(s: &str) -> [u8; 32] {
+        let bytes = hex::decode(s).unwrap();
+        bytes.try_into().unwrap()
+    }
 }

@@ -8,14 +8,19 @@ mod xts;
 
 pub use argon2_params::{argon2_params_for_pim, Argon2Params};
 pub use kdf::{
-    derive_dc01_header_key, derive_header_key_argon2id, derive_header_key_pbkdf2_sha512,
-    keyfiles_pool, pbkdf2_iterations, KdfError, PrfId,
+    bench_argon2id, bench_veracrypt_pim, derive_dc01_header_key, derive_header_key_argon2id,
+    derive_header_key_pbkdf2_blake2s, derive_header_key_pbkdf2_sha256,
+    derive_header_key_pbkdf2_sha512, derive_header_key_pbkdf2_streebog,
+    derive_header_key_pbkdf2_whirlpool, keyfiles_pool, pbkdf2_hmac_blake2s, pbkdf2_hmac_streebog,
+    pbkdf2_hmac_whirlpool, pbkdf2_iterations, KdfBench, KdfError, PrfId,
 };
 pub use keywrap::{
     mlkem_decapsulate_key, mlkem_encapsulate_key, mlkem_generate_keypair, KeyWrapError, WrappedKey,
 };
 pub use secure::{secure_eq, SecureBytes};
-pub use xts::{Aes256Xts, XtsError};
+pub use xts::{
+    Aes256Xts, CamelliaXts, DiskXts, KuznyechikXts, TwofishXts, VolumeCipher, XtsError,
+};
 
 pub const SALT_SIZE: usize = 64;
 pub const HEADER_XTS_KEY_SIZE: usize = 64; // two AES-256 keys

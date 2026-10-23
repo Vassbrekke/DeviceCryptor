@@ -185,6 +185,7 @@ mod tests {
                 password: b"alpha-pass",
                 keyfiles: &[],
                 pim: 0,
+                prf: None,
                 protect_hidden: false,
                 hidden_password: None,
             },
@@ -199,6 +200,7 @@ mod tests {
                 password: b"alpha-pass",
                 keyfiles: &[],
                 pim: 0,
+                prf: None,
                 protect_hidden: false,
                 hidden_password: None,
             },
@@ -211,6 +213,7 @@ mod tests {
                 password: b"beta-pass",
                 keyfiles: &[],
                 pim: 0,
+                prf: None,
                 protect_hidden: false,
                 hidden_password: None,
             },
@@ -225,11 +228,89 @@ mod tests {
                 password: b"alpha-pass",
                 keyfiles: &[],
                 pim: 0,
+                prf: None,
                 protect_hidden: false,
                 hidden_password: None,
             },
         )
         .unwrap();
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&bak);
+    }
+
+    fn opts(password: &'static [u8]) -> OpenOptions<'static> {
+        OpenOptions {
+            password,
+            keyfiles: &[],
+            pim: 0,
+            prf: None,
+            protect_hidden: false,
+            hidden_password: None,
+        }
+    }
+
+    #[test]
+    fn flipped_header_fails_until_restore() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        drop(tmp);
+        create_container(
+            &path,
+            &CreateOptions {
+                password: b"alpha-pass",
+                size: 2 * 1024 * 1024,
+                sparse: true,
+                ..CreateOptions::default()
+            },
+        )
+        .unwrap();
+        let bak = path.with_extension("hdrbak");
+        backup_headers(&path, &bak).unwrap();
+
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[80] ^= 0xff;
+        fs::write(&path, &bytes).unwrap();
+        assert!(open_container(&path, &opts(b"alpha-pass")).is_err());
+
+        restore_headers(&path, &bak).unwrap();
+        open_container(&path, &opts(b"alpha-pass")).unwrap();
+
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&bak);
+    }
+
+    #[test]
+    fn truncated_container_and_bad_backup_are_rejected() {
+        let tmp = NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        drop(tmp);
+        create_container(
+            &path,
+            &CreateOptions {
+                password: b"alpha-pass",
+                size: 2 * 1024 * 1024,
+                sparse: true,
+                ..CreateOptions::default()
+            },
+        )
+        .unwrap();
+        let bak = path.with_extension("hdrbak");
+        backup_headers(&path, &bak).unwrap();
+
+        let file = fs::OpenOptions::new().write(true).open(&path).unwrap();
+        file.set_len(100).unwrap();
+        assert!(open_container(&path, &opts(b"alpha-pass")).is_err());
+        assert!(backup_headers(&path, &bak).is_err());
+
+        fs::write(&bak, b"not-a-backup").unwrap();
+        assert!(restore_headers(&path, &bak).is_err());
+
+        let mut short = b"DCHDR01\0".to_vec();
+        short.extend_from_slice(&16u64.to_le_bytes());
+        short.extend_from_slice(&[0u8; 8]);
+        fs::write(&bak, short).unwrap();
+        assert!(restore_headers(&path, &bak).is_err());
 
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(&bak);

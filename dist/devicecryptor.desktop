@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=DeviceCryptor
+Comment=Encrypted file containers
+Exec=@BIN@
+Icon=drive-harddisk
+Terminal=false
+Type=Application
+Categories=System;Security;
+Keywords=encrypt;volume;veracrypt;container;
