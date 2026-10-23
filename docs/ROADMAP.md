@@ -20,11 +20,11 @@ Status snapshot for **0.2.x** (Linux file-container path).
 - [x] Install script + `.desktop` launcher + man page (`scripts/install-linux.sh`, `dist/`)
 - [x] Keyfile generator (`dc keyfile`, Tools menu)
 
-## Near-term (0.3 — still open)
+## 0.3 (done)
 
 - [x] Vendor oracle: SHA-512, SHA-256, BLAKE2s, and Whirlpool samples unlock (password `test`, AES-XTS) and the first data sector has a boot signature. Hidden SHA-512 volume uses `testhidden`. `test.streebog.hc` unlocks with HMAC-Streebog and Kuznyechik-XTS.
 - [x] Optional FUSE live FAT mount (`dc mount --live`, or the Live mount checkbox). Edits write through. Checkout remains the default. The mounting process must stay open.
-- [ ] Stronger VeraCrypt cascade/cipher coverage. AES-Twofish opens a VeraCrypt 1.26.29 volume. Other cascades are still absent. Serpent is blocked: the `serpent` crate accepts only a 128-bit key, and VeraCrypt uses 256-bit Serpent. No hand-rolled ciphers.
+- [x] VeraCrypt cascades that do not need Serpent: AES-Twofish, Kuznyechik-Twofish, Kuznyechik-AES, and Camellia-Kuznyechik. Each opens a VeraCrypt 1.26.29 HMAC-SHA-512 volume. Serpent and any cascade that includes it stay out: the reviewed `serpent` crate accepts only a 128-bit key, and VeraCrypt uses 256-bit Serpent. No hand-rolled ciphers.
 - [x] Argon2id golden volume. VeraCrypt 1.26.29 file `tests/goldens/argon2id-pim1.hc` opens with PIM 1. Header key derivation is 192 bytes; AES-XTS uses the first 64.
 
 ## Mid-term (0.4–0.5 — system encryption prep)

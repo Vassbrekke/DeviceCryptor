@@ -15,6 +15,12 @@ pub enum VolumeCipher {
     Camellia,
     /// VeraCrypt AES-Twofish. Encrypt order is Twofish, then AES.
     AesTwofish,
+    /// VeraCrypt Kuznyechik-Twofish. Encrypt order is Twofish, then Kuznyechik.
+    KuznyechikTwofish,
+    /// VeraCrypt Kuznyechik-AES. Encrypt order is AES, then Kuznyechik.
+    KuznyechikAes,
+    /// VeraCrypt Camellia-Kuznyechik. Encrypt order is Kuznyechik, then Camellia.
+    CamelliaKuznyechik,
 }
 
 impl VolumeCipher {
@@ -25,13 +31,19 @@ impl VolumeCipher {
             Self::Twofish => "Twofish-XTS",
             Self::Camellia => "Camellia-256-XTS",
             Self::AesTwofish => "AES-Twofish-XTS",
+            Self::KuznyechikTwofish => "Kuznyechik-Twofish-XTS",
+            Self::KuznyechikAes => "Kuznyechik-AES-XTS",
+            Self::CamelliaKuznyechik => "Camellia-Kuznyechik-XTS",
         }
     }
 
     /// Bytes of XTS key material this cipher reads from a derived or master key.
     pub fn xts_key_len(self) -> usize {
         match self {
-            Self::AesTwofish => 128,
+            Self::AesTwofish
+            | Self::KuznyechikTwofish
+            | Self::KuznyechikAes
+            | Self::CamelliaKuznyechik => 128,
             _ => 64,
         }
     }
@@ -197,45 +209,83 @@ impl CamelliaXts {
     }
 }
 
-/// VeraCrypt AES-Twofish cascade.
-/// Key layout: Twofish primary, AES primary, Twofish tweak, AES tweak (32 bytes each).
-/// Encrypt applies Twofish-XTS, then AES-XTS. Decrypt is the reverse.
+/// Two-cipher VeraCrypt cascade.
+/// Key layout is primary0, primary1, tweak0, tweak1 (32 bytes each).
+/// `first` is applied first on encrypt. Decrypt reverses that.
 #[derive(ZeroizeOnDrop)]
-pub struct AesTwofishXts {
+pub struct Cascade2Xts {
     #[zeroize(skip)]
-    twofish: TwofishXts,
+    first: CascadeHalf,
     #[zeroize(skip)]
-    aes: Aes256Xts,
+    second: CascadeHalf,
 }
 
-impl AesTwofishXts {
-    pub fn new(key: &[u8]) -> Result<Self, XtsError> {
+#[derive(ZeroizeOnDrop)]
+enum CascadeHalf {
+    Aes(#[zeroize(skip)] Box<Aes256Xts>),
+    Twofish(#[zeroize(skip)] Box<TwofishXts>),
+    Kuznyechik(#[zeroize(skip)] Box<KuznyechikXts>),
+    Camellia(#[zeroize(skip)] Box<CamelliaXts>),
+}
+
+impl CascadeHalf {
+    fn open(kind: VolumeCipher, key64: &[u8]) -> Result<Self, XtsError> {
+        match kind {
+            VolumeCipher::Aes256 => Ok(Self::Aes(Box::new(Aes256Xts::new(key64)?))),
+            VolumeCipher::Twofish => Ok(Self::Twofish(Box::new(TwofishXts::new(key64)?))),
+            VolumeCipher::Kuznyechik => Ok(Self::Kuznyechik(Box::new(KuznyechikXts::new(key64)?))),
+            VolumeCipher::Camellia => Ok(Self::Camellia(Box::new(CamelliaXts::new(key64)?))),
+            _ => Err(XtsError::Key),
+        }
+    }
+
+    fn encrypt_sector(&self, sector: u64, buf: &mut [u8]) -> Result<(), XtsError> {
+        match self {
+            Self::Aes(c) => c.encrypt_sector(sector, buf),
+            Self::Twofish(c) => c.encrypt_sector(sector, buf),
+            Self::Kuznyechik(c) => c.encrypt_sector(sector, buf),
+            Self::Camellia(c) => c.encrypt_sector(sector, buf),
+        }
+    }
+
+    fn decrypt_sector(&self, sector: u64, buf: &mut [u8]) -> Result<(), XtsError> {
+        match self {
+            Self::Aes(c) => c.decrypt_sector(sector, buf),
+            Self::Twofish(c) => c.decrypt_sector(sector, buf),
+            Self::Kuznyechik(c) => c.decrypt_sector(sector, buf),
+            Self::Camellia(c) => c.decrypt_sector(sector, buf),
+        }
+    }
+}
+
+impl Cascade2Xts {
+    pub fn new(first: VolumeCipher, second: VolumeCipher, key: &[u8]) -> Result<Self, XtsError> {
         if key.len() < 128 {
             return Err(XtsError::Key);
         }
-        let mut twofish_key = [0u8; 64];
-        twofish_key[..32].copy_from_slice(&key[..32]);
-        twofish_key[32..].copy_from_slice(&key[64..96]);
-        let mut aes_key = [0u8; 64];
-        aes_key[..32].copy_from_slice(&key[32..64]);
-        aes_key[32..].copy_from_slice(&key[96..128]);
+        let mut first_key = [0u8; 64];
+        first_key[..32].copy_from_slice(&key[..32]);
+        first_key[32..].copy_from_slice(&key[64..96]);
+        let mut second_key = [0u8; 64];
+        second_key[..32].copy_from_slice(&key[32..64]);
+        second_key[32..].copy_from_slice(&key[96..128]);
         let out = Self {
-            twofish: TwofishXts::new(&twofish_key)?,
-            aes: Aes256Xts::new(&aes_key)?,
+            first: CascadeHalf::open(first, &first_key)?,
+            second: CascadeHalf::open(second, &second_key)?,
         };
-        twofish_key.zeroize();
-        aes_key.zeroize();
+        first_key.zeroize();
+        second_key.zeroize();
         Ok(out)
     }
 
     pub fn encrypt_sector(&self, sector: u64, buf: &mut [u8]) -> Result<(), XtsError> {
-        self.twofish.encrypt_sector(sector, buf)?;
-        self.aes.encrypt_sector(sector, buf)
+        self.first.encrypt_sector(sector, buf)?;
+        self.second.encrypt_sector(sector, buf)
     }
 
     pub fn decrypt_sector(&self, sector: u64, buf: &mut [u8]) -> Result<(), XtsError> {
-        self.aes.decrypt_sector(sector, buf)?;
-        self.twofish.decrypt_sector(sector, buf)
+        self.second.decrypt_sector(sector, buf)?;
+        self.first.decrypt_sector(sector, buf)
     }
 }
 
@@ -246,7 +296,7 @@ pub enum DiskXts {
     Kuznyechik(Box<KuznyechikXts>),
     Twofish(Box<TwofishXts>),
     Camellia(Box<CamelliaXts>),
-    AesTwofish(Box<AesTwofishXts>),
+    Cascade(Box<Cascade2Xts>),
 }
 
 impl DiskXts {
@@ -256,7 +306,26 @@ impl DiskXts {
             VolumeCipher::Kuznyechik => Ok(Self::Kuznyechik(Box::new(KuznyechikXts::new(key)?))),
             VolumeCipher::Twofish => Ok(Self::Twofish(Box::new(TwofishXts::new(key)?))),
             VolumeCipher::Camellia => Ok(Self::Camellia(Box::new(CamelliaXts::new(key)?))),
-            VolumeCipher::AesTwofish => Ok(Self::AesTwofish(Box::new(AesTwofishXts::new(key)?))),
+            VolumeCipher::AesTwofish => Ok(Self::Cascade(Box::new(Cascade2Xts::new(
+                VolumeCipher::Twofish,
+                VolumeCipher::Aes256,
+                key,
+            )?))),
+            VolumeCipher::KuznyechikTwofish => Ok(Self::Cascade(Box::new(Cascade2Xts::new(
+                VolumeCipher::Twofish,
+                VolumeCipher::Kuznyechik,
+                key,
+            )?))),
+            VolumeCipher::KuznyechikAes => Ok(Self::Cascade(Box::new(Cascade2Xts::new(
+                VolumeCipher::Aes256,
+                VolumeCipher::Kuznyechik,
+                key,
+            )?))),
+            VolumeCipher::CamelliaKuznyechik => Ok(Self::Cascade(Box::new(Cascade2Xts::new(
+                VolumeCipher::Kuznyechik,
+                VolumeCipher::Camellia,
+                key,
+            )?))),
         }
     }
 
@@ -266,7 +335,7 @@ impl DiskXts {
             Self::Kuznyechik(c) => c.encrypt_sector(sector, buf),
             Self::Twofish(c) => c.encrypt_sector(sector, buf),
             Self::Camellia(c) => c.encrypt_sector(sector, buf),
-            Self::AesTwofish(c) => c.encrypt_sector(sector, buf),
+            Self::Cascade(c) => c.encrypt_sector(sector, buf),
         }
     }
 
@@ -276,7 +345,7 @@ impl DiskXts {
             Self::Kuznyechik(c) => c.decrypt_sector(sector, buf),
             Self::Twofish(c) => c.decrypt_sector(sector, buf),
             Self::Camellia(c) => c.decrypt_sector(sector, buf),
-            Self::AesTwofish(c) => c.decrypt_sector(sector, buf),
+            Self::Cascade(c) => c.decrypt_sector(sector, buf),
         }
     }
 }
@@ -327,6 +396,12 @@ mod tests {
         assert_eq!(VolumeCipher::Twofish.label(), "Twofish-XTS");
         assert_eq!(VolumeCipher::Camellia.label(), "Camellia-256-XTS");
         assert_eq!(VolumeCipher::AesTwofish.label(), "AES-Twofish-XTS");
+        assert_eq!(VolumeCipher::KuznyechikTwofish.label(), "Kuznyechik-Twofish-XTS");
+        assert_eq!(VolumeCipher::KuznyechikAes.label(), "Kuznyechik-AES-XTS");
+        assert_eq!(
+            VolumeCipher::CamelliaKuznyechik.label(),
+            "Camellia-Kuznyechik-XTS"
+        );
     }
 
     /// AES-256-XTS sector 0 against Python `cryptography` 50.0.1.

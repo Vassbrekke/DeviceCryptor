@@ -172,13 +172,21 @@ fn try_with_kdf(
         let mut wide = Zeroizing::new([0u8; 128]);
         derive_header_key_pbkdf2_sha512(opts.password, opts.keyfiles, salt, opts.pim, wide.as_mut())
             .map_err(|e| VeraCryptError::Crypto(e.to_string()))?;
-        let xts = DiskXts::open(VolumeCipher::AesTwofish, wide.as_ref())
-            .map_err(|e| VeraCryptError::Crypto(e.to_string()))?;
-        let mut buf = *enc;
-        xts.decrypt_sector(0, &mut buf)
-            .map_err(|e| VeraCryptError::Crypto(e.to_string()))?;
-        if parse_header(&buf).is_ok() {
-            accepted = Some((buf, VolumeCipher::AesTwofish));
+        for cipher in [
+            VolumeCipher::AesTwofish,
+            VolumeCipher::KuznyechikTwofish,
+            VolumeCipher::KuznyechikAes,
+            VolumeCipher::CamelliaKuznyechik,
+        ] {
+            let xts = DiskXts::open(cipher, wide.as_ref())
+                .map_err(|e| VeraCryptError::Crypto(e.to_string()))?;
+            let mut buf = *enc;
+            xts.decrypt_sector(0, &mut buf)
+                .map_err(|e| VeraCryptError::Crypto(e.to_string()))?;
+            if parse_header(&buf).is_ok() {
+                accepted = Some((buf, cipher));
+                break;
+            }
         }
     }
     let (buf, cipher) = accepted.ok_or(VeraCryptError::Auth)?;
@@ -457,6 +465,44 @@ mod tests {
         assert_eq!(
             &decrypt_vendor_boot(&data, &header)[510..512],
             &[0x55, 0xAA]
+        );
+    }
+
+    fn opens_cascade(file: &str, cipher: VolumeCipher) {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/goldens")
+            .join(file);
+        let data = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let opts = VeraCryptOpenOptions {
+            password: b"test",
+            keyfiles: &[],
+            pim: 0,
+            prf: Some(PrfId::Sha512),
+        };
+        let header = try_open_veracrypt_header(&data[..VC_HEADER_EFFECTIVE], &opts)
+            .unwrap_or_else(|e| panic!("{file} should unlock: {e}"));
+        assert_eq!(header.cipher, cipher);
+        assert_eq!(
+            &decrypt_vendor_boot(&data, &header)[510..512],
+            &[0x55, 0xAA]
+        );
+    }
+
+    #[test]
+    fn opens_minted_kuznyechik_twofish_sample() {
+        opens_cascade("kuznyechik-twofish-sha512.hc", VolumeCipher::KuznyechikTwofish);
+    }
+
+    #[test]
+    fn opens_minted_kuznyechik_aes_sample() {
+        opens_cascade("kuznyechik-aes-sha512.hc", VolumeCipher::KuznyechikAes);
+    }
+
+    #[test]
+    fn opens_minted_camellia_kuznyechik_sample() {
+        opens_cascade(
+            "camellia-kuznyechik-sha512.hc",
+            VolumeCipher::CamelliaKuznyechik,
         );
     }
 
