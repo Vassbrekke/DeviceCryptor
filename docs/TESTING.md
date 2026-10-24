@@ -29,12 +29,23 @@ Not covered: crash during checkin, Windows.
 
 ## Fuzzing
 
-Requires [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) and a nightly toolchain. Not in CI. No crash triage policy yet.
+Requires [cargo-fuzz](https://github.com/rust-fuzz/cargo-fuzz) and a nightly toolchain. CI runs `sector_xts` and `header_payload` for 10000 executions each (AddressSanitizer, the cargo-fuzz default).
 
 ```bash
-cargo +nightly fuzz run sector_xts
+cargo +nightly fuzz run sector_xts -- -runs=10000
+cargo +nightly fuzz run header_payload -- -runs=10000
 ```
 
 `sector_xts` encrypts and decrypts aligned slices. It does not derive a password key.
 
-`header_parse` still calls the real header open with password `fuzz`. That pays a full KDF on every input, including Argon2id when the PRF is left on auto. Do not put that target in CI.
+`header_payload` parses already-decrypted DC01 and VeraCrypt payloads. It does not derive a key.
+
+`header_parse` still calls the real header open with password `fuzz`. That pays a full KDF on every input, including Argon2id when the PRF is left on auto. Do not put that target in CI. Longer local runs of the CI targets are useful. They are not a substitute for the bounded CI job.
+
+### Crash policy
+
+A fuzz failure is a release blocker.
+
+- A panic, a failed assert, or a sanitizer error fails the job.
+- There is no ignore list and no allowed-crash corpus.
+- Parsers return errors for bad input. They do not panic.

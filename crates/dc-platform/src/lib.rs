@@ -1,6 +1,10 @@
-//! Platform helpers: privileges, path checks, optional loop hints.
+//! Platform helpers: privileges, path checks, dm-crypt helper frame.
+
+mod helper;
 
 use std::path::{Path, PathBuf};
+
+pub use helper::{apply_dm_plain, cryptsetup_argv, decode_frame, encode_frame, DmPlainRequest};
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -97,7 +101,7 @@ pub fn platform_report() -> Vec<&'static str> {
             "mount-fat-checkout: yes",
             "mount-fat-fuse: yes",
             "mount-ext4-loop: root-only",
-            "system-encryption: no",
+            "system-encryption: built-not-run",
             "macos-mount: no",
             "windows-mount: no",
         ]
@@ -110,14 +114,14 @@ pub fn platform_report() -> Vec<&'static str> {
             "mount-fat-checkout: no",
             "mount-fat-fuse: no",
             "mount-ext4-loop: no",
-            "system-encryption: no",
+            "system-encryption: built-not-run",
             "macos-mount: no",
             "windows-mount: no",
         ]
     }
 }
 
-/// Check a future privileged-helper request.
+/// Check a privileged-helper request.
 ///
 /// The password and the master key are not arguments. A mapper name is a single
 /// token. A device path must be an absolute `/dev/` path with no `..`.
@@ -152,7 +156,7 @@ mod tests {
     #[test]
     fn report_refuses_system_encryption() {
         let lines = platform_report();
-        assert!(lines.contains(&"system-encryption: no"));
+        assert!(lines.contains(&"system-encryption: built-not-run"));
         #[cfg(target_os = "linux")]
         assert!(lines.contains(&"mount-fat-checkout: yes"));
         #[cfg(target_os = "linux")]

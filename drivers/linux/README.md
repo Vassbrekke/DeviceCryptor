@@ -13,11 +13,12 @@ This directory holds design notes until a module is required.
 
 Do not load `vendor/VeraCrypt` kernel code.
 
-## Helper request (not an attach)
+## Helper
 
-`dc attach --device /dev/sda1 --mapper dcroot` only checks the request. It does not call `dmsetup` or `cryptsetup`.
+`sudo dc attach --device /dev/sda1 --mapper dcroot` prompts for the volume password, unlocks the header, and pipes the master key to `dc helper`. The helper runs `cryptsetup open --type plain` for AES-256-XTS only, and only when the path is a block device and the process is root.
 
-- No password and no master key on the command line or in the request.
+This was not run against a disk. Do not point it at a LUKS device.
+
+- No password and no master key on the command line.
 - Mapper name: 1..=64 of `[A-Za-z0-9._-]`.
-- Device: absolute `/dev/` path, no `..`.
-- A valid request is still refused until a privileged helper exists and has been tested.
+- Device: absolute `/dev/` path, no `..`, and not a symlink.

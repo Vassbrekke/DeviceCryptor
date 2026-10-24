@@ -1,6 +1,7 @@
 #!/bin/sh
-# local-top script: prompt for DeviceCryptor system volume password and unlock.
+# local-top script: prompt and map a DeviceCryptor system volume.
 # Place in /etc/initramfs-tools/scripts/local-top/devicecryptor
+# This host's disks were not used to try this script.
 
 PREREQ="udev"
 prereqs() { echo "$PREREQ"; }
@@ -13,7 +14,6 @@ DC_DEVICE="${DC_SYSTEM_DEVICE:-}"
 DC_MAPPER="${DC_MAPPER_NAME:-dcroot}"
 
 if [ -z "$DC_DEVICE" ]; then
-    # No DeviceCryptor system device configured.
     exit 0
 fi
 
@@ -22,21 +22,12 @@ if [ ! -x /bin/dc ]; then
     exit 0
 fi
 
-echo "DeviceCryptor: unlocking $DC_DEVICE"
-# Full block-mapper integration lands with the Linux dm helper;
-# this scaffold validates the password against the volume header.
-/bin/dc info --password-env DC_PASSWORD "$DC_DEVICE" 2>/dev/null || {
-    printf "Password: "
-    stty -echo
-    read -r DC_PASSWORD
-    stty echo
-    echo
-    export DC_PASSWORD
-    /bin/dc info --password-env DC_PASSWORD "$DC_DEVICE" || {
-        echo "DeviceCryptor: unlock failed" >&2
-        exit 1
-    }
+echo "DeviceCryptor: mapping $DC_DEVICE to $DC_MAPPER"
+# dc attach prompts on the console. It is already root here, so it does not call sudo.
+# The master key goes to `dc helper` on a pipe, then to cryptsetup stdin.
+/bin/dc attach --device "$DC_DEVICE" --mapper "$DC_MAPPER" || {
+    echo "DeviceCryptor: attach failed" >&2
+    exit 1
 }
 
-echo "DeviceCryptor: header unlocked (mapper attach TODO: $DC_MAPPER)"
 exit 0

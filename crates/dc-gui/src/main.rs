@@ -1,8 +1,10 @@
 //! DeviceCryptor main window — classic VeraCrypt layout, not a tabbed shell.
 //!
-//! Futuristic extras (ML-KEM key wrap, Argon2id benchmark) live under Tools.
-//! Disk encryption remains AES-256-XTS.
+//! Volumes, Tools, and every form open in their own window. The main window
+//! stays the slot list. Disk encryption remains AES-256-XTS. ML-KEM key wrap
+//! and the Argon2id benchmark live under Tools.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
@@ -20,7 +22,7 @@ use dc_volume::{
 };
 use iced::theme::Palette;
 use iced::widget::{button, checkbox, column, pick_list, row, scrollable, text, text_input, Space};
-use iced::{Color, Element, Length, Task, Theme};
+use iced::{window, Color, Element, Length, Size, Subscription, Task, Theme};
 use zeroize::Zeroize;
 
 #[cfg(target_os = "linux")]
@@ -31,17 +33,13 @@ use dc_volume::{
 const SLOT_COUNT: u8 = 8;
 
 fn main() -> iced::Result {
-    iced::application("DeviceCryptor", App::update, App::view)
-        .theme(classic_theme)
-        .window_size((920.0, 660.0))
-        .run_with(|| {
-            let mut app = App::default();
-            let task = app.refresh_status();
-            (app, task)
-        })
+    iced::daemon(App::title, App::update, App::view)
+        .theme(App::theme)
+        .subscription(App::subscription)
+        .run_with(App::boot)
 }
 
-fn classic_theme(_: &App) -> Theme {
+fn classic_theme() -> Theme {
     Theme::custom(
         "Classic".into(),
         Palette {
@@ -69,13 +67,22 @@ enum Dialog {
     Keyfile,
     Benchmark,
     About,
+    /// Static explanation. Holds no secrets.
+    Notice,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Menu {
     Volumes,
     Tools,
-    Help,
+}
+
+/// Which window a [`window::Id`] is drawing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Surface {
+    Main,
+    Menu(Menu),
+    Dialog(Dialog),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,8 +182,10 @@ impl std::fmt::Display for PrfChoice {
 }
 
 struct App {
-    menu: Option<Menu>,
-    dialog: Dialog,
+    main_id: window::Id,
+    surfaces: HashMap<window::Id, Surface>,
+    /// Text for [`Dialog::Notice`]. Never a password.
+    notice: String,
     busy: bool,
     status: String,
     volume_path: String,
@@ -243,8 +252,9 @@ struct StatusRow {
 impl Default for App {
     fn default() -> Self {
         Self {
-            menu: None,
-            dialog: Dialog::None,
+            main_id: window::Id::unique(),
+            surfaces: HashMap::new(),
+            notice: String::new(),
             busy: false,
             status: String::new(),
             volume_path: String::new(),
@@ -297,6 +307,8 @@ enum Message {
     ToggleMenu(Menu),
     Open(Dialog),
     CloseDialog,
+    CloseMenu,
+    WindowClosed(window::Id),
     SelectSlot(u8),
     VolumePath(String),
     NeverSaveHistory(bool),
@@ -386,28 +398,71 @@ enum Message {
 }
 
 impl App {
+    fn boot() -> (Self, Task<Message>) {
+        let (main_id, open) = window::open(window::Settings {
+            size: Size::new(920.0, 540.0),
+            min_size: Some(Size::new(760.0, 460.0)),
+            position: window::Position::Centered,
+            ..window::Settings::default()
+        });
+        let mut app = Self::default();
+        app.main_id = main_id;
+        app.surfaces.insert(main_id, Surface::Main);
+        let refresh = app.refresh_status();
+        (app, Task::batch([open.discard(), refresh]))
+    }
+
+    fn title(&self, id: window::Id) -> String {
+        match self.surfaces.get(&id).copied() {
+            Some(Surface::Menu(Menu::Volumes)) => "Volumes".into(),
+            Some(Surface::Menu(Menu::Tools)) => "Tools".into(),
+            Some(Surface::Dialog(dialog)) => dialog_title(dialog).into(),
+            _ => "DeviceCryptor".into(),
+        }
+    }
+
+    fn theme(&self, _id: window::Id) -> Theme {
+        classic_theme()
+    }
+
+    fn subscription(&self) -> Subscription<Message> {
+        window::close_events().map(Message::WindowClosed)
+    }
+
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::ToggleMenu(menu) => {
-                self.menu = if self.menu == Some(menu) {
-                    None
-                } else {
-                    Some(menu)
-                };
+                if self.menu_kind() == Some(menu) {
+                    return self.close_where(|surface| matches!(surface, Surface::Menu(_)));
+                }
+                return self.open_menu(menu);
             }
             Message::Open(dialog) => {
-                self.menu = None;
-                self.dialog = dialog;
-                if dialog == Dialog::Mount && self.mount_point.trim().is_empty() {
+                let menus = self.close_where(|surface| matches!(surface, Surface::Menu(_)));
+                let same = self.current_dialog() == dialog;
+                if !same && dialog == Dialog::Mount && self.mount_point.trim().is_empty() {
                     self.mount_point = default_mountpoint(self.selected_slot);
                 }
-                if dialog == Dialog::Favorites {
-                    return self.run_op(fav_list);
+                let opened = self.open_dialog(dialog);
+                if !same && dialog == Dialog::Favorites {
+                    return Task::batch([menus, opened, self.run_op(fav_list)]);
                 }
+                return Task::batch([menus, opened]);
             }
             Message::CloseDialog => {
-                self.dialog = Dialog::None;
-                self.clear_secrets();
+                return self.close_where(|surface| matches!(surface, Surface::Dialog(_)));
+            }
+            Message::CloseMenu => {
+                return self.close_where(|surface| matches!(surface, Surface::Menu(_)));
+            }
+            Message::WindowClosed(id) => {
+                if id == self.main_id {
+                    self.clear_secrets();
+                    return iced::exit();
+                }
+                if matches!(self.surfaces.remove(&id), Some(Surface::Dialog(_))) {
+                    self.clear_secrets();
+                }
             }
             Message::SelectSlot(n) => {
                 self.selected_slot = n;
@@ -423,16 +478,28 @@ impl App {
                 }
             }
             Message::SelectDevice => {
-                self.status = "Select Device is not available in this build. System and partition encryption are not ready — use Select File for a container.".into();
+                self.notice = "Select Device is not available in this build. System and partition encryption are not ready. Use Select File for a container.".into();
+                return self.open_dialog(Dialog::Notice);
             }
             Message::AutoMountDevices => {
-                self.status = "Auto-Mount Devices is not available in this build. File containers only. Use Tools → Favorite Volumes, then Mount.".into();
+                self.notice = "Auto-Mount Devices is not available in this build. File containers only. Open Tools, then Favorite Volumes, then Mount.".into();
+                return self.open_dialog(Dialog::Notice);
             }
             Message::DoDismountSelected => {
                 let id = slot_id(self.selected_slot);
-                return self.run_op(move || run_dismount(&id));
+                let op = self.run_op(move || run_dismount(&id));
+                return Task::batch([
+                    self.close_where(|surface| matches!(surface, Surface::Menu(_))),
+                    op,
+                ]);
             }
-            Message::DoDismountAll => return self.run_op(run_dismount_all),
+            Message::DoDismountAll => {
+                let op = self.run_op(run_dismount_all);
+                return Task::batch([
+                    self.close_where(|surface| matches!(surface, Surface::Menu(_))),
+                    op,
+                ]);
+            }
             Message::DoStatus => {
                 self.status = "working…".into();
                 return self.refresh_status();
@@ -441,29 +508,36 @@ impl App {
                 self.busy = false;
                 match res {
                     Ok(s) => {
+                        let dialog = self.current_dialog();
                         let stay = matches!(
-                            self.dialog,
+                            dialog,
                             Dialog::Favorites
                                 | Dialog::Keywrap
+                                | Dialog::Keyfile
                                 | Dialog::Benchmark
+                                | Dialog::Properties
                                 | Dialog::About
+                                | Dialog::Notice
                                 | Dialog::None
                         );
-                        if self.dialog == Dialog::Favorites {
+                        if dialog == Dialog::Favorites {
                             self.fav_list = s;
                             self.status = "favorites updated".into();
                         } else {
                             self.status = s;
                         }
                         self.clear_secrets();
-                        if !stay {
-                            if self.never_save_history {
-                                self.volume_path.clear();
-                            }
-                            self.dialog = Dialog::None;
+                        let refresh = self.refresh_status_quiet();
+                        if stay {
+                            return refresh;
                         }
-                        self.menu = None;
-                        return self.refresh_status_quiet();
+                        if self.never_save_history {
+                            self.volume_path.clear();
+                        }
+                        return Task::batch([
+                            self.close_where(|surface| matches!(surface, Surface::Dialog(_))),
+                            refresh,
+                        ]);
                     }
                     Err(e) => self.status = format!("error: {e}"),
                 }
@@ -644,8 +718,8 @@ impl App {
             }
             Message::UseFavorite(path) => {
                 self.volume_path = path;
-                self.dialog = Dialog::None;
                 self.status = "volume selected — enter the password with Mount".into();
+                return self.close_where(|surface| matches!(surface, Surface::Dialog(_)));
             }
 
             Message::KwEk(v) => self.kw_ek = v,
@@ -787,15 +861,74 @@ impl App {
     }
 
     fn clear_secrets(&mut self) {
-        self.mount_password.clear();
-        self.mount_hidden_password.clear();
-        self.create_password.clear();
-        self.create_confirm.clear();
-        self.create_hidden_password.clear();
-        self.cp_old.clear();
-        self.cp_new.clear();
-        self.cp_confirm.clear();
-        self.info_password.clear();
+        self.mount_password.zeroize();
+        self.mount_hidden_password.zeroize();
+        self.create_password.zeroize();
+        self.create_confirm.zeroize();
+        self.create_hidden_password.zeroize();
+        self.cp_old.zeroize();
+        self.cp_new.zeroize();
+        self.cp_confirm.zeroize();
+        self.info_password.zeroize();
+    }
+
+    fn current_dialog(&self) -> Dialog {
+        self.surfaces
+            .values()
+            .find_map(|surface| match surface {
+                Surface::Dialog(dialog) => Some(*dialog),
+                _ => None,
+            })
+            .unwrap_or(Dialog::None)
+    }
+
+    fn menu_kind(&self) -> Option<Menu> {
+        self.surfaces.values().find_map(|surface| match surface {
+            Surface::Menu(menu) => Some(*menu),
+            _ => None,
+        })
+    }
+
+    /// Closes matching windows. Password fields are wiped when a dialog closes.
+    fn close_where(&mut self, pred: impl Fn(&Surface) -> bool) -> Task<Message> {
+        let ids: Vec<window::Id> = self
+            .surfaces
+            .iter()
+            .filter_map(|(id, surface)| pred(surface).then_some(*id))
+            .collect();
+        let mut wipe = false;
+        for id in &ids {
+            if matches!(self.surfaces.remove(id), Some(Surface::Dialog(_))) {
+                wipe = true;
+            }
+        }
+        if wipe {
+            self.clear_secrets();
+        }
+        Task::batch(ids.into_iter().map(window::close))
+    }
+
+    fn open_dialog(&mut self, dialog: Dialog) -> Task<Message> {
+        if self.current_dialog() == dialog {
+            if let Some(id) = self
+                .surfaces
+                .iter()
+                .find_map(|(id, surface)| matches!(surface, Surface::Dialog(_)).then_some(*id))
+            {
+                return window::gain_focus(id);
+            }
+        }
+        let close = self.close_where(|surface| matches!(surface, Surface::Dialog(_)));
+        let (id, open) = window::open(dialog_window_settings(dialog));
+        self.surfaces.insert(id, Surface::Dialog(dialog));
+        Task::batch([close, open.discard()])
+    }
+
+    fn open_menu(&mut self, menu: Menu) -> Task<Message> {
+        let close = self.close_where(|surface| matches!(surface, Surface::Menu(_)));
+        let (id, open) = window::open(menu_window_settings(menu));
+        self.surfaces.insert(id, Surface::Menu(menu));
+        Task::batch([close, open.discard()])
     }
 
     fn mount_for_slot(&self, n: u8) -> Option<&StatusRow> {
@@ -850,36 +983,44 @@ impl App {
         )
     }
 
-    fn view(&self) -> Element<'_, Message> {
-        let mut page = column![
+    fn status_line(&self) -> String {
+        if self.busy {
+            format!("working…  {}", self.status)
+        } else {
+            self.status.clone()
+        }
+    }
+
+    fn view(&self, id: window::Id) -> Element<'_, Message> {
+        match self.surfaces.get(&id).copied() {
+            Some(Surface::Menu(menu)) => self.view_menu_window(menu),
+            Some(Surface::Dialog(dialog)) => self.view_dialog_window(dialog),
+            Some(Surface::Main) => self.view_main(),
+            None => {
+                if id == self.main_id {
+                    self.view_main()
+                } else {
+                    column![].into()
+                }
+            }
+        }
+    }
+
+    fn view_main(&self) -> Element<'_, Message> {
+        let page = column![
             self.view_menu_bar(),
             text("Linux file containers  ·  AES-256-XTS").size(12),
+            self.view_slots(),
+            self.view_volume_row(),
+            self.view_actions(),
+            checkbox("Never save history", self.never_save_history)
+                .on_toggle(Message::NeverSaveHistory),
+            Space::with_height(8),
+            text(self.status_line()).size(13),
         ]
         .spacing(6)
         .padding(10)
         .width(Length::Fill);
-
-        if let Some(drop) = self.view_menu_dropdown() {
-            page = page.push(drop);
-        }
-        page = page.push(self.view_slots());
-        page = page.push(self.view_volume_row());
-        page = page.push(self.view_actions());
-        page = page.push(
-            checkbox("Never save history", self.never_save_history)
-                .on_toggle(Message::NeverSaveHistory),
-        );
-        if self.dialog != Dialog::None {
-            page = page.push(Space::with_height(6));
-            page = page.push(self.view_dialog());
-        }
-        page = page.push(Space::with_height(8));
-        let status = if self.busy {
-            format!("working…  {}", self.status)
-        } else {
-            self.status.clone()
-        };
-        page = page.push(text(status).size(13));
 
         scrollable(page)
             .width(Length::Fill)
@@ -889,16 +1030,21 @@ impl App {
 
     fn view_menu_bar(&self) -> Element<'_, Message> {
         row![
-            menu_button("Volumes", Menu::Volumes, self.menu, self.busy),
-            menu_button("Tools", Menu::Tools, self.menu, self.busy),
-            menu_button("Help", Menu::Help, self.menu, self.busy),
+            menu_button("Volumes", Menu::Volumes, self.menu_kind(), self.busy),
+            menu_button("Tools", Menu::Tools, self.menu_kind(), self.busy),
+            bar_button(
+                "Help",
+                Message::Open(Dialog::About),
+                self.current_dialog() == Dialog::About,
+                self.busy,
+            ),
         ]
         .spacing(4)
         .into()
     }
 
-    fn view_menu_dropdown(&self) -> Option<Element<'_, Message>> {
-        let items: &[(&str, Message)] = match self.menu? {
+    fn view_menu_window(&self, menu: Menu) -> Element<'_, Message> {
+        let items: &[(&str, Message)] = match menu {
             Menu::Volumes => &[
                 ("Create New Volume...", Message::Open(Dialog::Create)),
                 ("Mount Volume", Message::Open(Dialog::Mount)),
@@ -921,13 +1067,31 @@ impl App {
                 ("Favorite Volumes...", Message::Open(Dialog::Favorites)),
                 ("Post-quantum key wrap...", Message::Open(Dialog::Keywrap)),
             ],
-            Menu::Help => &[("About DeviceCryptor", Message::Open(Dialog::About))],
         };
-        let mut col = column![].spacing(2);
+        let title = match menu {
+            Menu::Volumes => "Volumes",
+            Menu::Tools => "Tools",
+        };
+        let mut col = column![text(title).size(16)]
+            .spacing(4)
+            .padding(12)
+            .width(Length::Fill);
         for (label, msg) in items {
-            col = col.push(cmd_button(label, msg.clone(), self.busy));
+            let mut btn = button(text(*label).size(14))
+                .style(button::secondary)
+                .padding([6, 10])
+                .width(Length::Fill);
+            if !self.busy {
+                btn = btn.on_press(msg.clone());
+            }
+            col = col.push(btn);
         }
-        Some(col.into())
+        col = col.push(Space::with_height(6));
+        col = col.push(cmd_button("Close", Message::CloseMenu, false));
+        scrollable(col)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 
     fn view_slots(&self) -> Element<'_, Message> {
@@ -1028,22 +1192,8 @@ impl App {
         .into()
     }
 
-    fn view_dialog(&self) -> Element<'_, Message> {
-        let title = match self.dialog {
-            Dialog::None => "",
-            Dialog::Mount => "Enter Password",
-            Dialog::Create => "Volume Creation",
-            Dialog::Chpasswd => "Change Password or Keyfiles",
-            Dialog::HeaderBackup => "Backup Volume Header",
-            Dialog::HeaderRestore => "Restore Volume Header",
-            Dialog::Properties => "Volume Properties",
-            Dialog::Favorites => "Favorite Volumes",
-            Dialog::Keywrap => "Post-quantum key wrap",
-            Dialog::Keyfile => "Keyfile Generator",
-            Dialog::Benchmark => "Benchmark",
-            Dialog::About => "About DeviceCryptor",
-        };
-        let body = match self.dialog {
+    fn view_dialog_window(&self, dialog: Dialog) -> Element<'_, Message> {
+        let body = match dialog {
             Dialog::None => column![].into(),
             Dialog::Mount => self.view_mount_dialog(),
             Dialog::Create => self.view_create_dialog(),
@@ -1056,14 +1206,23 @@ impl App {
             Dialog::Keyfile => self.view_keyfile_dialog(),
             Dialog::Benchmark => self.view_bench_dialog(),
             Dialog::About => self.view_about_dialog(),
+            Dialog::Notice => text(&self.notice).size(13).into(),
         };
-        column![
-            text(title).size(16),
-            body,
-            cmd_button("Cancel", Message::CloseDialog, false),
-        ]
-        .spacing(8)
-        .into()
+        let mut page = column![text(dialog_title(dialog)).size(16), body]
+            .spacing(8)
+            .padding(12)
+            .width(Length::Fill);
+        if dialog != Dialog::Notice {
+            let status = self.status_line();
+            if !status.is_empty() {
+                page = page.push(text(status).size(13));
+            }
+        }
+        page = page.push(cmd_button("Close", Message::CloseDialog, false));
+        scrollable(page)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into()
     }
 
     fn view_mount_dialog(&self) -> Element<'_, Message> {
@@ -1443,16 +1602,73 @@ fn menu_button<'a>(
     open: Option<Menu>,
     busy: bool,
 ) -> Element<'a, Message> {
+    bar_button(label, Message::ToggleMenu(menu), open == Some(menu), busy)
+}
+
+fn bar_button<'a>(label: &'a str, msg: Message, active: bool, busy: bool) -> Element<'a, Message> {
     let mut btn = button(text(label).size(14)).padding([4, 10]);
-    btn = if open == Some(menu) {
+    btn = if active {
         btn.style(button::primary)
     } else {
         btn.style(button::secondary)
     };
     if !busy {
-        btn = btn.on_press(Message::ToggleMenu(menu));
+        btn = btn.on_press(msg);
     }
     btn.into()
+}
+
+fn dialog_title(dialog: Dialog) -> &'static str {
+    match dialog {
+        Dialog::None => "DeviceCryptor",
+        Dialog::Mount => "Enter Password",
+        Dialog::Create => "Volume Creation",
+        Dialog::Chpasswd => "Change Password or Keyfiles",
+        Dialog::HeaderBackup => "Backup Volume Header",
+        Dialog::HeaderRestore => "Restore Volume Header",
+        Dialog::Properties => "Volume Properties",
+        Dialog::Favorites => "Favorite Volumes",
+        Dialog::Keywrap => "Post-quantum key wrap",
+        Dialog::Keyfile => "Keyfile Generator",
+        Dialog::Benchmark => "Benchmark",
+        Dialog::About => "About DeviceCryptor",
+        Dialog::Notice => "Notice",
+    }
+}
+
+fn child_window(width: f32, height: f32) -> window::Settings {
+    window::Settings {
+        size: Size::new(width, height),
+        min_size: Some(Size::new(280.0, 140.0)),
+        position: window::Position::Centered,
+        ..window::Settings::default()
+    }
+}
+
+fn menu_window_settings(menu: Menu) -> window::Settings {
+    let height = match menu {
+        Menu::Volumes => 380.0,
+        Menu::Tools => 240.0,
+    };
+    child_window(340.0, height)
+}
+
+fn dialog_window_settings(dialog: Dialog) -> window::Settings {
+    let (width, height) = match dialog {
+        Dialog::Mount => (680.0, 560.0),
+        Dialog::Create => (680.0, 520.0),
+        Dialog::Chpasswd => (600.0, 440.0),
+        Dialog::HeaderBackup | Dialog::HeaderRestore => (600.0, 240.0),
+        Dialog::Properties => (600.0, 400.0),
+        Dialog::Favorites => (600.0, 480.0),
+        Dialog::Keywrap => (680.0, 420.0),
+        Dialog::Keyfile => (560.0, 280.0),
+        Dialog::Benchmark => (560.0, 280.0),
+        Dialog::About => (560.0, 340.0),
+        Dialog::Notice => (520.0, 220.0),
+        Dialog::None => (420.0, 180.0),
+    };
+    child_window(width, height)
 }
 
 fn cmd_button<'a>(label: &'a str, msg: Message, busy: bool) -> Element<'a, Message> {

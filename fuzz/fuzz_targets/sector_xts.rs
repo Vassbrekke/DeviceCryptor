@@ -1,8 +1,8 @@
 #![no_main]
-use libfuzzer_sys::fuzz_target;
 use dc_crypto::Aes256Xts;
+use libfuzzer_sys::fuzz_target;
 
-/// Sector encrypt/decrypt only. No password KDF.
+// Sector encrypt/decrypt only. No password KDF.
 fuzz_target!(|data: &[u8]| {
     if data.len() < 80 {
         return;

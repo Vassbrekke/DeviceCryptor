@@ -9,4 +9,7 @@
 fuzz/target/
 fuzz/corpus/
 fuzz/artifacts/
+dist/SHA256SUMS
+dist/*.cdx.json
+crates/**/*.cdx.json
 testdata/

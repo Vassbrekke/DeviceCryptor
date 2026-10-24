@@ -384,6 +384,108 @@ pub fn open_container(path: &Path, opts: &OpenOptions<'_>) -> Result<MountedVolu
 
 const VC_DATA_OFFSET_FALLBACK: u64 = 131_072;
 
+/// Header fields needed to build a dm-crypt mapping. The file is opened read-only.
+pub struct HeaderUnlock {
+    pub sector_size: u32,
+    pub data_offset: u64,
+    pub data_length: u64,
+    pub cipher: VolumeCipher,
+    pub kind: VolumeKind,
+    pub master: SecureBytes,
+}
+
+pub fn unlock_header(path: &Path, opts: &OpenOptions<'_>) -> Result<HeaderUnlock, VolumeError> {
+    let mut file = FsOpenOptions::new().read(true).open(path)?;
+    let mut header = [0u8; 512];
+    file.read_exact(&mut header)?;
+    if let Some(found) = unlock_dc01_bytes(&header, opts, false) {
+        header.zeroize();
+        return Ok(found);
+    }
+    if let Some(found) = unlock_vc_bytes(&header, opts, false) {
+        header.zeroize();
+        return Ok(found);
+    }
+    file.seek(SeekFrom::Start(HIDDEN_HEADER_OFFSET))?;
+    if file.read_exact(&mut header).is_ok() {
+        if let Some(found) = unlock_vc_bytes(&header, opts, true) {
+            header.zeroize();
+            return Ok(found);
+        }
+        if let Some(found) = unlock_dc01_bytes(&header, opts, true) {
+            header.zeroize();
+            return Ok(found);
+        }
+    }
+    header.zeroize();
+    Err(VolumeError::Auth)
+}
+
+fn unlock_dc01_bytes(
+    header: &[u8],
+    opts: &OpenOptions<'_>,
+    _is_hidden: bool,
+) -> Option<HeaderUnlock> {
+    let dc_opts = Dc01OpenOptions {
+        password: opts.password,
+        keyfiles: opts.keyfiles,
+    };
+    let h = open_dc01_header(header, &dc_opts).ok()?;
+    Some(HeaderUnlock {
+        sector_size: h.sector_size,
+        data_offset: h.encrypted_area_start,
+        data_length: h.encrypted_area_length,
+        cipher: VolumeCipher::Aes256,
+        kind: VolumeKind::Dc01,
+        master: h.master_key,
+    })
+}
+
+fn unlock_vc_bytes(
+    header: &[u8],
+    opts: &OpenOptions<'_>,
+    _is_hidden: bool,
+) -> Option<HeaderUnlock> {
+    let vc_opts = VeraCryptOpenOptions {
+        password: opts.password,
+        keyfiles: opts.keyfiles,
+        pim: opts.pim,
+        prf: opts.prf,
+    };
+    let h = try_open_veracrypt_header(header, &vc_opts).ok()?;
+    let sector = if h.sector_size == 0 {
+        512
+    } else {
+        h.sector_size
+    };
+    let data_offset = if h.encrypted_area_start != 0 {
+        h.encrypted_area_start
+    } else {
+        VC_DATA_OFFSET_FALLBACK
+    };
+    let data_length = if h.encrypted_area_length != 0 {
+        h.encrypted_area_length
+    } else {
+        h.volume_size
+    };
+    let n = h.cipher.xts_key_len();
+    if h.master_keys.len() < n {
+        return None;
+    }
+    let mut master = SecureBytes::new(n);
+    master
+        .as_mut_slice()
+        .copy_from_slice(&h.master_keys.as_slice()[..n]);
+    Some(HeaderUnlock {
+        sector_size: sector,
+        data_offset,
+        data_length,
+        cipher: h.cipher,
+        kind: VolumeKind::VeraCrypt,
+        master,
+    })
+}
+
 fn try_open_at(
     path: &Path,
     offset: u64,

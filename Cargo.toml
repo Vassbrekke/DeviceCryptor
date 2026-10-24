@@ -7,6 +7,7 @@ members = [
     "crates/dc-platform",
     "crates/dc-cli",
     "crates/dc-gui",
+    "fuzz",
 ]
 default-members = [
     "crates/dc-crypto",

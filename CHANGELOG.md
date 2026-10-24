@@ -4,6 +4,10 @@
 
 ### Added
 
+- `sudo dc attach` maps an AES-256-XTS volume through a root `dc helper` process and `cryptsetup`. The master key stays on a pipe. Not run on a disk.
+- Initramfs local-top calls `dc attach`. Windows mount requests and EFI module logic have host-side checks. No `.sys` or `.efi` was built or loaded.
+- CI fuzz of decrypted header payloads and sector XTS (`header_payload`, `sector_xts`), with a crash policy. The KDF target stays local.
+- `scripts/release-linux.sh` — locked release build, path remap, SHA256 sums, CycloneDX SBOM, and a same-toolchain hash check
 - Classic main window (slot list, Volume field, Select File, Mount / Dismount / Create Volume). Password, creation, header backup/restore, and password change are dialogs. ML-KEM wrap and Argon2id benchmark stay under Tools.
 - `dc bench` times DC01 Argon2id defaults; `--pim` times the VeraCrypt PIM mapping
 - `dc keyfile` writes a random keyfile (mode 0600)
@@ -15,6 +19,11 @@
 
 ### Changed
 
+- DC01 format version 1 is the frozen on-disk contract (`docs/FORMAT.md`)
+- Threat model signed off against the shipped Linux file-container features
+- System encryption, initramfs attach, and Windows EFI stay a last stage and are not in this build
+- VeraCrypt header and key CRC checks use a constant-time compare. Acceptance is unchanged.
+- The 1.0 audit scope is the shipped crates. Boot and Windows drop off until that later stage.
 - Public wording matches assurance: experimental unaudited containers with optional ML-KEM-768 **key wrap**, not a “post-quantum-ready VeraCrypt rewrite”
 - Documented test/fuzz methodology and 1.0 assurance gates (`docs/ASSURANCE.md`, `docs/TESTING.md`)
 

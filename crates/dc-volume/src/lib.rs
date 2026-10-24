@@ -17,7 +17,8 @@ pub use maintain::{backup_headers, change_password, inspect_header_backup, resto
 pub use session::{
     create_container, create_container_with_hidden, create_container_with_hidden_progress,
     create_container_with_progress, dismount_session, open_container, open_with_master_key,
-    read_sectors, write_sectors, CreateOptions, MountedVolume, OpenOptions, VolumeKind,
+    read_sectors, unlock_header, write_sectors, CreateOptions, HeaderUnlock, MountedVolume,
+    OpenOptions, VolumeKind,
 };
 
 #[cfg(target_os = "linux")]

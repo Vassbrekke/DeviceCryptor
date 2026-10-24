@@ -12,9 +12,14 @@ esac
 
 . /usr/share/initramfs-tools/hook-functions
 
-# Copy unlock helper into initramfs when present.
+# Copy unlock helper and cryptsetup into initramfs when present.
 if [ -x /usr/bin/dc ]; then
     copy_exec /usr/bin/dc /bin
+fi
+if [ -x /usr/sbin/cryptsetup ]; then
+    copy_exec /usr/sbin/cryptsetup /sbin
+elif [ -x /sbin/cryptsetup ]; then
+    copy_exec /sbin/cryptsetup /sbin
 fi
 
 exit 0

@@ -4,7 +4,7 @@ use dc_crypto::{
     derive_dc01_header_key, fill_random, secure_eq, Aes256Xts, SecureBytes, SALT_SIZE,
 };
 use thiserror::Error;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 pub const DC01_MAGIC: u32 = 0x4443_3031; // 'DC01' big-endian ascii as u32 BE
 pub const DC01_VERSION: u16 = 1;
@@ -258,6 +258,33 @@ fn try_decrypt(
     xts.decrypt_sector(0, &mut payload)
         .map_err(|e| Dc01Error::Crypto(e.to_string()))?;
 
+    let parsed = parse_dc01_payload(&payload, time_cost, memory_kib, parallelism);
+    payload.zeroize();
+    parsed
+}
+
+/// Parse a decrypted DC01 payload. Does not derive a key or touch the disk cipher.
+///
+/// `time_cost`, `memory_kib`, and `parallelism` are the parameters that produced
+/// the header key. They must match the values stored in the payload.
+pub fn parse_dc01_payload(
+    payload_in: &[u8; DC01_EFFECTIVE - SALT_SIZE],
+    time_cost: u32,
+    memory_kib: u32,
+    parallelism: u32,
+) -> Result<Dc01Header, Dc01Error> {
+    let mut payload = *payload_in;
+    let result = parse_dc01_payload_in_place(&mut payload, time_cost, memory_kib, parallelism);
+    payload.zeroize();
+    result
+}
+
+fn parse_dc01_payload_in_place(
+    payload: &mut [u8; DC01_EFFECTIVE - SALT_SIZE],
+    time_cost: u32,
+    memory_kib: u32,
+    parallelism: u32,
+) -> Result<Dc01Header, Dc01Error> {
     if &payload[0..4] != b"DC01" {
         return Err(Dc01Error::Auth);
     }
@@ -378,5 +405,11 @@ mod tests {
         let again = open_dc01_header(&resealed, &new).unwrap();
         assert_eq!(again.master_key.as_slice(), master.as_slice());
         assert_eq!(again.volume_data_size, 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_payload_rejects_zeros_without_a_kdf() {
+        let payload = [0u8; DC01_EFFECTIVE - SALT_SIZE];
+        assert!(parse_dc01_payload(&payload, 3, 64 * 1024, 4).is_err());
     }
 }

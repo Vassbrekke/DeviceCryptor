@@ -1,6 +1,6 @@
 # DeviceCryptor
 
-Experimental Rust encrypted-container tool. Linux file containers work. Windows and system encryption do not.
+Experimental Rust encrypted-container tool. Linux file containers work. `sudo dc attach` can map an AES-256-XTS block device and was not run on a disk. Windows `.sys` and `.efi` images are not built.
 
 > **Experimental.** Not independently audited. Do not store irreplaceable data in these volumes. The 0.3 roadmap slice is in this tree. The crate version is still 0.2.0 until a release tag.
 
@@ -62,7 +62,7 @@ cargo build -p dc-gui --release
 ./target/release/devicecryptor
 ```
 
-Password, creation, header backup/restore, and password change are dialogs. ML-KEM key wrap and the Argon2id benchmark sit under **Tools**. Select Device and Auto-Mount Devices stay visible and say that system encryption is not in this build.
+Password, creation, header backup/restore, and password change are dialogs. ML-KEM key wrap and the Argon2id benchmark sit under **Tools**. Select Device does not open a disk. System attach is `sudo dc attach`.
 
 See [docs/LINUX_TESTING.md](docs/LINUX_TESTING.md), [docs/ASSURANCE.md](docs/ASSURANCE.md), [docs/ROADMAP.md](docs/ROADMAP.md), [docs/PLATFORMS.md](docs/PLATFORMS.md), [CHANGELOG.md](CHANGELOG.md).
 
@@ -87,9 +87,9 @@ DeviceCryptor is unaudited. Primitive crates are used rather than hand-rolled ci
 |-------------|---------|
 | Vendor volume opens for the ciphers listed above | Serpent and Serpent cascades |
 | AES-256-XTS checked against Python `cryptography`; ML-KEM-768 keygen and encapsulation checked against NIST ACVP | Independent cryptographic review |
-| Header restore after a flipped header; bad backups rejected | Fuzzing in CI, side-channel review |
-| Linux FAT checkout and opt-in live FUSE | System encryption, macOS and Windows mounts |
-| `cargo audit` in CI | A clean audit and a frozen DC01 spec |
+| Header restore after a flipped header; bad backups rejected; fuzz in CI | External side-channel lab |
+| Linux FAT checkout and opt-in live FUSE; frozen DC01 version 1 | System encryption, macOS and Windows mounts |
+| `cargo audit` in CI, no vulnerability ignore list | Independent cryptographic review |
 
 Stronger language (“rewrite of VeraCrypt”, “post-quantum-ready”, production use) waits on the gates in [docs/ASSURANCE.md](docs/ASSURANCE.md) and [docs/AUDIT.md](docs/AUDIT.md).
 

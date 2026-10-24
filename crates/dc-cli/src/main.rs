@@ -1,22 +1,21 @@
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use dc_crypto::{
     bench_argon2id, bench_veracrypt_pim, fill_random, mlkem_decapsulate_key, mlkem_encapsulate_key,
-    mlkem_generate_keypair, PrfId, WrappedKey,
+    mlkem_generate_keypair, PrfId, VolumeCipher, WrappedKey,
 };
 use dc_format::dc01::{DC01_DEFAULT_MEM_KIB, DC01_DEFAULT_PARALLELISM, DC01_DEFAULT_TIME};
 use dc_volume::{
     add_favorite, backup_headers, change_password, create_container, create_container_with_hidden,
     create_container_with_hidden_progress, create_container_with_progress, dismount_session,
-    list_favorites, open_container, remove_favorite, restore_headers, inspect_header_backup,
-    CreateOptions, Favorite,
-    FsType, OpenOptions,
+    inspect_header_backup, list_favorites, open_container, remove_favorite, restore_headers,
+    unlock_header, CreateOptions, Favorite, FsType, OpenOptions, VolumeKind,
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -160,7 +159,9 @@ enum Commands {
     },
     /// Print the mount backends this build supports.
     Platforms,
-    /// Validate a system-device helper request. Does not call dmsetup.
+    /// Unlock a block device and map it with dm-crypt. Must run as root.
+    ///
+    /// File containers stay on `dc mount`. This command does not create a partition.
     Attach {
         /// Absolute /dev path. Not a file container.
         #[arg(long)]
@@ -168,7 +169,17 @@ enum Commands {
         /// Mapper token, not a path.
         #[arg(long)]
         mapper: String,
+        #[arg(long)]
+        keyfile: Vec<PathBuf>,
+        #[arg(long, default_value_t = 0)]
+        pim: i32,
+        /// VeraCrypt PKCS-5 PRF: auto, sha512, sha256, blake2s, whirlpool, streebog, argon2
+        #[arg(long, default_value = "auto")]
+        prf: String,
     },
+    /// Read one helper frame on stdin and exec cryptsetup. Invoked by `dc attach`.
+    #[command(hide = true)]
+    Helper,
 }
 
 #[derive(Subcommand, Debug)]
@@ -547,7 +558,11 @@ fn run() -> Result<()> {
                     } else {
                         st.cipher.as_str()
                     },
-                    if st.kdf.is_empty() { "unknown" } else { st.kdf.as_str() },
+                    if st.kdf.is_empty() {
+                        "unknown"
+                    } else {
+                        st.kdf.as_str()
+                    },
                     st.id
                 );
                 if st.backend == "fat-fuse" {
@@ -677,7 +692,11 @@ fn run() -> Result<()> {
             }
             HeaderCmd::Check { infile } => {
                 let n = inspect_header_backup(&infile)?;
-                println!("header backup ok {} ({} bytes of header slots)", infile.display(), n);
+                println!(
+                    "header backup ok {} ({} bytes of header slots)",
+                    infile.display(),
+                    n
+                );
             }
         },
         Commands::Status => {
@@ -819,10 +838,14 @@ fn run() -> Result<()> {
             println!("2. dc info VOLUME   — confirm the password still opens the header.");
             println!("3. dc header restore VOLUME BACKUP   — only if you have a DCHDR01 backup.");
             println!("4. dc mount VOLUME MOUNTPOINT   — checkout mount. Use --live only if this process can stay open.");
-            println!("System encryption and /dev/mapper attach are not in this build.");
+            println!("A system disk uses `sudo dc attach`. That path was not run against a disk in this tree.");
             if let Some(path) = check {
                 let n = inspect_header_backup(&path)?;
-                println!("header backup ok {} ({} bytes of header slots)", path.display(), n);
+                println!(
+                    "header backup ok {} ({} bytes of header slots)",
+                    path.display(),
+                    n
+                );
             }
         }
         Commands::Platforms => {
@@ -830,13 +853,127 @@ fn run() -> Result<()> {
                 println!("{line}");
             }
         }
-        Commands::Attach { device, mapper } => {
-            dc_platform::validate_helper_request(&device, &mapper)?;
-            bail!(
-                "refused: this build does not call dmsetup or cryptsetup. File containers use dc mount."
-            );
+        Commands::Attach {
+            device,
+            mapper,
+            keyfile,
+            pim,
+            prf,
+        } => {
+            elevate_attach_if_needed()?;
+            run_attach(&device, &mapper, &keyfile, pim, &prf)?;
         }
+        Commands::Helper => run_helper()?,
     }
+    Ok(())
+}
+
+fn elevate_attach_if_needed() -> Result<()> {
+    if dc_platform::is_elevated() {
+        return Ok(());
+    }
+    if std::env::var_os("DC_ATTACH_TRIED_SUDO").is_some() {
+        bail!("dc attach is still not root after sudo");
+    }
+    let exe = std::env::current_exe().context("current executable")?;
+    let mut cmd = Command::new("sudo");
+    cmd.arg("--preserve-env=DC_ATTACH_TRIED_SUDO")
+        .arg("--")
+        .arg(&exe)
+        .env("DC_ATTACH_TRIED_SUDO", "1");
+    for arg in std::env::args().skip(1) {
+        cmd.arg(arg);
+    }
+    let status = cmd.status().context("sudo dc attach")?;
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+fn run_attach(device: &str, mapper: &str, keyfile: &[PathBuf], pim: i32, prf: &str) -> Result<()> {
+    dc_platform::validate_helper_request(device, mapper)?;
+    if !dc_platform::is_elevated() {
+        bail!("dc attach must be root");
+    }
+    let pw = read_password(None, None, "Password: ")?;
+    let kfs = load_keyfiles(keyfile)?;
+    let kf_refs: Vec<&[u8]> = kfs.iter().map(|k| k.as_slice()).collect();
+    let prf = parse_prf(prf)?;
+    let opened = unlock_header(
+        std::path::Path::new(device),
+        &OpenOptions {
+            password: pw.as_bytes(),
+            keyfiles: &kf_refs,
+            pim,
+            prf,
+            protect_hidden: false,
+            hidden_password: None,
+        },
+    )?;
+    for mut k in kfs {
+        k.zeroize();
+    }
+    if opened.cipher != VolumeCipher::Aes256 || opened.master.len() != 64 {
+        bail!("dm helper maps AES-256-XTS only");
+    }
+    if opened.sector_size != 512 {
+        bail!("dm helper accepts 512-byte sectors only");
+    }
+    let iv_skip_512 = match opened.kind {
+        VolumeKind::Dc01 => 0,
+        VolumeKind::VeraCrypt => opened.data_offset / 512,
+    };
+    let req = dc_platform::DmPlainRequest {
+        device: device.to_string(),
+        mapper: mapper.to_string(),
+        sector_size: opened.sector_size,
+        data_offset: opened.data_offset,
+        data_length: opened.data_length,
+        iv_skip_512,
+        key: Zeroizing::new(opened.master.as_slice().to_vec()),
+    };
+    let frame = dc_platform::encode_frame(&req)?;
+    let exe = std::env::current_exe().context("current executable")?;
+    let mut child = Command::new(exe)
+        .arg("helper")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .context("spawn dc helper")?;
+    {
+        let mut input = child.stdin.take().context("helper stdin")?;
+        input.write_all(&frame)?;
+    }
+    let status = child.wait().context("dc helper")?;
+    if !status.success() {
+        bail!("dc helper failed");
+    }
+    println!("mapped /dev/mapper/{mapper}");
+    Ok(())
+}
+
+fn run_helper() -> Result<()> {
+    if !dc_platform::is_elevated() {
+        bail!("refused: dc helper must be root");
+    }
+    let mut buf = Vec::new();
+    let mut tmp = [0u8; 256];
+    let mut stdin = io::stdin().lock();
+    loop {
+        let n = stdin.read(&mut tmp)?;
+        if n == 0 {
+            break;
+        }
+        if buf.len() + n > 1024 {
+            buf.zeroize();
+            tmp.zeroize();
+            bail!("refused: helper frame too large");
+        }
+        buf.extend_from_slice(&tmp[..n]);
+    }
+    tmp.zeroize();
+    let req = dc_platform::decode_frame(&buf)?;
+    buf.zeroize();
+    dc_platform::apply_dm_plain(&req)?;
     Ok(())
 }
 

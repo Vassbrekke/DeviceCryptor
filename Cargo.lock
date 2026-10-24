@@ -165,6 +165,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "arbitrary"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
+
+[[package]]
 name = "argon2"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1034,6 +1040,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dc-fuzz"
+version = "0.0.0"
+dependencies = [
+ "dc-crypto",
+ "dc-format",
+ "libfuzzer-sys",
+]
+
+[[package]]
 name = "dc-gui"
 version = "0.2.0"
 dependencies = [
@@ -1056,6 +1071,7 @@ dependencies = [
  "anyhow",
  "libc",
  "thiserror 2.0.19",
+ "zeroize",
 ]
 
 [[package]]
@@ -2295,6 +2311,16 @@ name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
+name = "libfuzzer-sys"
+version = "0.4.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a9fd2f41a1cba099f79a0b6b6c35656cf7c03351a7bae8ff0f28f25270f929d2"
+dependencies = [
+ "arbitrary",
+ "cc",
+]
 
 [[package]]
 name = "libloading"

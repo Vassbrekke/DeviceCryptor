@@ -5,8 +5,8 @@ use byteorder::{BigEndian, ByteOrder};
 use dc_crypto::{
     crc32, derive_header_key_argon2id, derive_header_key_pbkdf2_blake2s,
     derive_header_key_pbkdf2_sha256, derive_header_key_pbkdf2_sha512,
-    derive_header_key_pbkdf2_streebog, derive_header_key_pbkdf2_whirlpool, DiskXts, PrfId,
-    SecureBytes, VolumeCipher, SALT_SIZE,
+    derive_header_key_pbkdf2_streebog, derive_header_key_pbkdf2_whirlpool, secure_eq, DiskXts,
+    PrfId, SecureBytes, VolumeCipher, SALT_SIZE,
 };
 use thiserror::Error;
 use zeroize::Zeroizing;
@@ -257,7 +257,12 @@ fn try_with_kdf(
     Ok(header)
 }
 
-fn parse_header(
+fn u32_eq(a: u32, b: u32) -> bool {
+    secure_eq(&a.to_be_bytes(), &b.to_be_bytes())
+}
+
+/// Parse a decrypted VeraCrypt/TrueCrypt payload. Does not derive a key.
+pub fn parse_header(
     buf: &[u8; VC_HEADER_EFFECTIVE - SALT_SIZE],
 ) -> Result<VeraCryptHeader, VeraCryptError> {
     let magic = BigEndian::read_u32(&buf[0..4]);
@@ -270,7 +275,7 @@ fn parse_header(
                                                   // Full header layout: salt(64) + payload. Payload offset 0 = header offset 64.
                                                   // Key area at header 256..511 → payload 192..447 (256 bytes)
     let key_area = &buf[192..448];
-    if crc32(key_area) != key_crc {
+    if !u32_eq(crc32(key_area), key_crc) {
         // Some volumes store CRC differently — still check header CRC
         let _ = computed_key_crc;
     }
@@ -278,13 +283,13 @@ fn parse_header(
     let header_crc = BigEndian::read_u32(&buf[188..192]); // offset 252 in full hdr → 188 in payload
     let mut hdr_fields = [0u8; 188];
     hdr_fields.copy_from_slice(&buf[0..188]);
-    if crc32(&hdr_fields) != header_crc {
+    if !u32_eq(crc32(&hdr_fields), header_crc) {
         // VeraCrypt: CRC of decrypted bytes 64-251 of full header = payload 0..187
         return Err(VeraCryptError::Auth);
     }
 
     // Re-check key CRC properly
-    if crc32(key_area) != key_crc {
+    if !u32_eq(crc32(key_area), key_crc) {
         return Err(VeraCryptError::Auth);
     }
 
@@ -554,7 +559,10 @@ mod tests {
 
     #[test]
     fn opens_minted_kuznyechik_twofish_sample() {
-        opens_cascade("kuznyechik-twofish-sha512.hc", VolumeCipher::KuznyechikTwofish);
+        opens_cascade(
+            "kuznyechik-twofish-sha512.hc",
+            VolumeCipher::KuznyechikTwofish,
+        );
     }
 
     #[test]
@@ -669,7 +677,11 @@ mod tests {
         let mut buf = [0u8; 512];
         buf.copy_from_slice(&data[start..start + 512]);
         let unit = header.encrypted_area_start / u64::from(sector);
-        let xts = DiskXts::open(header.cipher, &header.master_keys.as_slice()[..header.cipher.xts_key_len()]).unwrap();
+        let xts = DiskXts::open(
+            header.cipher,
+            &header.master_keys.as_slice()[..header.cipher.xts_key_len()],
+        )
+        .unwrap();
         xts.decrypt_sector(unit, &mut buf).unwrap();
         buf
     }

@@ -18,7 +18,13 @@ DriverEntry(
 {
     UNREFERENCED_PARAMETER(RegistryPath);
     DriverObject->DriverUnload = DcUnload;
-    /* TODO: create device, symbolic link, register dispatch for IOCTL_DC_* */
+    /*
+     * WDK dispatch must:
+     *   - reject a short buffer
+     *   - call dc_request_reject on the path and password length
+     *   - RtlSecureZeroMemory the password before every return
+     * Sector crypto is not linked in this tree. Do not report a volume as mounted.
+     */
     return STATUS_SUCCESS;
 }
 

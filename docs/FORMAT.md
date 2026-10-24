@@ -1,6 +1,6 @@
 # Volume Format Specification
 
-**Working draft.** Layout and field meanings for implementers and tests. Not a frozen on-disk contract until 1.0 (see [ASSURANCE.md](ASSURANCE.md)). Interoperability with other tools is not promised.
+**Frozen format version 1.** This is the on-disk contract for DC01 volumes this program writes. Interoperability with other tools is not promised. See [ASSURANCE.md](ASSURANCE.md).
 
 ## DC01 (DeviceCryptor native — create path)
 
@@ -41,13 +41,23 @@ New volumes use **DC01**. Layout mirrors VeraCrypt geometry so tools can reason 
 | 44 | 8 | Encrypted area length |
 | 52 | 8 | Hidden volume size (0 if none) |
 | 60 | 4 | Reserved |
-| 64 | 32 | BLAKE3-256 MAC over bytes 0–63 of payload (with MAC zeroed) |
+| 64 | 32 | BLAKE3-256 MAC. Input is payload bytes 0–63, then 32 zero bytes, then payload bytes 96 through the end (master key and reserved). The MAC field itself is not input. |
 | 96 | 64 | Master XTS key1 (32) \|\| key2 (32) |
 | 160 | 288 | Reserved / future ML-KEM slot metadata |
 
 Header keys: Argon2id(password‖keyfiles, salt) → 64 bytes → XTS key1/key2 for header.
 
+### Compatibility policy
+
+- Writers emit version `1` and set reserved bytes to zero.
+- Readers reject any version other than `1`.
+- Readers do not interpret reserved bytes. Those bytes are inside the MAC input, so a change fails authentication.
+- A later format version uses a new version field. Version 1 volumes keep this layout.
+- Offsets, magic `DC01`, cipher id `1`, and KDF id `1` do not change for version 1.
+
 ## VeraCrypt / TrueCrypt (compat — mount only)
+
+This section is not part of the frozen DC01 contract.
 
 See `vendor/VeraCrypt/src/Common/Volumes.c` header v5:
 

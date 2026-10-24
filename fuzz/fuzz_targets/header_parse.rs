@@ -1,7 +1,7 @@
 #![no_main]
-use libfuzzer_sys::fuzz_target;
 use dc_format::dc01::{open_dc01_header, Dc01OpenOptions};
 use dc_format::veracrypt::{try_open_veracrypt_header, VeraCryptOpenOptions};
+use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
     if data.len() < 512 {

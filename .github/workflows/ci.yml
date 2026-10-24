@@ -36,5 +36,33 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: cargo-audit
         run: |
-          cargo install cargo-audit
+          cargo install cargo-audit --locked
           cargo audit
+
+  fuzz:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: clang
+        run: sudo apt-get update && sudo apt-get install -y clang
+      - name: cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+      - name: sector_xts
+        run: cargo +nightly fuzz run sector_xts -- -runs=10000
+      - name: header_payload
+        run: cargo +nightly fuzz run header_payload -- -runs=10000
+
+  repro:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@stable
+      - name: same-toolchain dc hash
+        run: ./scripts/release-linux.sh repro
