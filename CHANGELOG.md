@@ -19,6 +19,7 @@
 
 ### Changed
 
+- GUI text rendering uses `lru` 0.16.4 via a pinned copy of iced_glyphon 0.6.0. That drops the vulnerable 0.12.5 release.
 - DC01 format version 1 is the frozen on-disk contract (`docs/FORMAT.md`)
 - Threat model signed off against the shipped Linux file-container features
 - System encryption, initramfs attach, and Windows EFI stay a last stage and are not in this build

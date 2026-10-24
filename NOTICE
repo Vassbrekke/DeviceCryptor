@@ -22,3 +22,11 @@ Behavioral compatibility (volume headers, PIM→KDF mapping, EFI PBA / BlockIo
 intercept design) was reimplemented from those specifications for
 interoperability. No VeraCrypt or VeraCrypt-DCS object code is compiled into
 DeviceCryptor release binaries.
+
+---------------------------------------------------------------------------
+Linked third-party code
+---------------------------------------------------------------------------
+
+`third_party/iced_glyphon` is iced_glyphon 0.6.0 (MIT OR Apache-2.0 OR Zlib),
+used by the GUI's wgpu text path. The only local change is the `lru`
+dependency, set to 0.16.4 so the 0.12.5 `IterMut` advisory is not in the lockfile.

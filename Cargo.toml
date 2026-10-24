@@ -60,3 +60,7 @@ hkdf = "0.12"
 hex = "0.4"
 tempfile = "3.14"
 rpassword = "7.3"
+
+# iced_glyphon 0.6.0 requires lru ^0.12, which is below the 0.16.3 fix.
+[patch.crates-io]
+iced_glyphon = { path = "third_party/iced_glyphon" }
