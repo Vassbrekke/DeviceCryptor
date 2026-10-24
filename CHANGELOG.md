@@ -10,7 +10,7 @@
 - `--wipe` prints a stderr progress meter
 - Mount session keys prefer the user kernel keyring (`keyctl padd` on stdin) and fall back to the mode-0600 session file
 - A wrong DC01 password no longer tries VeraCrypt's 416 MiB Argon2id. That mapping belongs to VeraCrypt headers only.
-- 0.3 cascade coverage: Kuznyechik-Twofish, Kuznyechik-AES, and Camellia-Kuznyechik open VeraCrypt 1.26.29 volumes. Serpent cascades are not included.
+- `dc attach` checks a system-device helper request and then refuses. It does not call dmsetup or cryptsetup.
 - `scripts/install-linux.sh` installs `dc`, `devicecryptor`, a man page, and a desktop launcher
 
 ### Changed

@@ -99,7 +99,7 @@ Copy `target/release/dc` next to your containers — no installer required for c
 
 ## Initramfs (system encryption — later)
 
-See `boot/linux-initramfs/`. Header unlock is wired; full dm/ublk attach is next.
+See `boot/linux-initramfs/`. Header password check only. Mapper attach is not in this build. File-container recovery: [RECOVERY.md](RECOVERY.md).
 
 ## Ext4 (root)
 

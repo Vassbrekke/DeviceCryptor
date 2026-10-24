@@ -15,6 +15,8 @@ Golden VeraCrypt samples live in the vendor tree, not copied here:
 
 `aes-twofish-sha512.hc` was minted here with VeraCrypt 1.26.29: AES-Twofish, HMAC-SHA-512, PIM 0, password `test`, FAT, 5 MiB. Encrypt order is Twofish-XTS, then AES-XTS. The key is 128 bytes.
 
-`kuznyechik-twofish-sha512.hc`, `kuznyechik-aes-sha512.hc`, and `camellia-kuznyechik-sha512.hc` are the other non-Serpent cascades, same password and hash. Serpent cascades are not in this tree.
+`kuznyechik-twofish-sha512.hc`, `kuznyechik-aes-sha512.hc`, and `camellia-kuznyechik-sha512.hc` are the other non-Serpent cascades, same password and HMAC-SHA-512. Serpent cascades are not in this tree.
+
+`aes-twofish-sha256.hc` is AES-Twofish with HMAC-SHA-256. `aes-twofish-blake2s.hc` is HMAC-BLAKE2s. `aes-twofish-whirlpool.hc` is HMAC-Whirlpool. `aes-twofish-streebog.hc` is HMAC-Streebog.
 
 Passwords in the vendor samples are from `vendor/VeraCrypt/Tests/bench.bat`.

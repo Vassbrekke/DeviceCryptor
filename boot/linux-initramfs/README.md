@@ -1,22 +1,14 @@
 # DeviceCryptor Linux initramfs unlock
 
-## Install (Debian/Ubuntu initramfs-tools)
+This is a scaffold. It can check a volume header password. It does not attach a decrypted block device.
 
-1. Install `dc` to `/usr/bin/dc`
-2. Copy `hook-devicecryptor` → `/etc/initramfs-tools/hooks/devicecryptor`
-3. Copy `local-top-devicecryptor` → `/etc/initramfs-tools/scripts/local-top/devicecryptor`
-4. Set kernel cmdline or `/etc/devicecryptor/system.env`:
-   - `DC_SYSTEM_DEVICE=/dev/disk/by-uuid/...`
-   - `DC_MAPPER_NAME=dcroot`
-5. `update-initramfs -u` and configure GRUB/`systemd-boot` root=`/dev/mapper/dcroot`
+Do not set `root=/dev/mapper/dcroot` yet. There is no mapper.
 
-## Recovery
+File-container recovery is in [docs/RECOVERY.md](../../docs/RECOVERY.md). Use `dc rescue` on a live image.
 
-Boot a rescue ISO with DeviceCryptor, run:
+## Files
 
-```sh
-dc info /dev/sdXN
-# then attach decrypted mapping (phase completion)
-```
+- `hook-devicecryptor` copies `/usr/bin/dc` into an initramfs when that hook is installed
+- `local-top-devicecryptor` prompts and runs `dc info` when `DC_SYSTEM_DEVICE` is set
 
-Recovery passphrase / keyfile support mirrors VeraCrypt rescue workflow.
+Installing these does not make system encryption work.

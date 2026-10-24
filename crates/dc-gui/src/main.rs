@@ -1254,7 +1254,7 @@ impl App {
                 self.volume_path.as_str()
             })
             .size(13),
-            text("OK reports the cipher that opened this volume.").size(12),
+            text("OK reports the cipher and the password hash that opened this volume.").size(12),
             text_input("Password", &self.info_password)
                 .secure(true)
                 .on_input(Message::InfoPassword)
@@ -1758,7 +1758,7 @@ impl MountSnap {
                 },
             )?;
             Ok(format!(
-                "mounted {} → {} (backend={}, encryption={}, id={}, session={})",
+                "mounted {} → {} (backend={}, encryption={}, hash={}, id={}, session={})",
                 self.path.display(),
                 self.mountpoint.display(),
                 st.backend,
@@ -1767,6 +1767,7 @@ impl MountSnap {
                 } else {
                     st.cipher.as_str()
                 },
+                if st.kdf.is_empty() { "unknown" } else { st.kdf.as_str() },
                 st.id,
                 if st.session_store.is_empty() {
                     "file"
@@ -1885,8 +1886,9 @@ impl InfoSnap {
             },
         )?;
         let msg = format!(
-            "kind: {:?}\nencryption: {}\nsector_size: {}\ndata_offset: {}\ndata_length: {}\nhidden: {}",
+            "kind: {:?}\nhash: {}\nencryption: {}\nsector_size: {}\ndata_offset: {}\ndata_length: {}\nhidden: {}",
             vol.kind,
+            vol.kdf,
             vol.cipher.label(),
             vol.sector_size,
             vol.data_offset,

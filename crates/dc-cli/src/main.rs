@@ -14,7 +14,8 @@ use dc_format::dc01::{DC01_DEFAULT_MEM_KIB, DC01_DEFAULT_PARALLELISM, DC01_DEFAU
 use dc_volume::{
     add_favorite, backup_headers, change_password, create_container, create_container_with_hidden,
     create_container_with_hidden_progress, create_container_with_progress, dismount_session,
-    list_favorites, open_container, remove_favorite, restore_headers, CreateOptions, Favorite,
+    list_favorites, open_container, remove_favorite, restore_headers, inspect_header_backup,
+    CreateOptions, Favorite,
     FsType, OpenOptions,
 };
 use zeroize::{Zeroize, Zeroizing};
@@ -151,8 +152,23 @@ enum Commands {
         #[arg(long, default_value_t = 64)]
         bytes: u32,
     },
+    /// Print the file-container recovery steps. Does not attach a system disk.
+    Rescue {
+        /// Optional header backup to check
+        #[arg(long)]
+        check: Option<PathBuf>,
+    },
     /// Print the mount backends this build supports.
     Platforms,
+    /// Validate a system-device helper request. Does not call dmsetup.
+    Attach {
+        /// Absolute /dev path. Not a file container.
+        #[arg(long)]
+        device: String,
+        /// Mapper token, not a path.
+        #[arg(long)]
+        mapper: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -164,6 +180,8 @@ enum HeaderCmd {
     },
     /// Restore primary+hidden header slots from a backup file
     Restore { container: PathBuf, infile: PathBuf },
+    /// Check a header backup file without writing to a container
+    Check { infile: PathBuf },
 }
 
 #[derive(Subcommand, Debug)]
@@ -520,7 +538,7 @@ fn run() -> Result<()> {
                     },
                 )?;
                 println!(
-                    "mounted {} → {} (backend={}, encryption={}, id={})",
+                    "mounted {} → {} (backend={}, encryption={}, hash={}, id={})",
                     path.display(),
                     mountpoint.display(),
                     st.backend,
@@ -529,6 +547,7 @@ fn run() -> Result<()> {
                     } else {
                         st.cipher.as_str()
                     },
+                    if st.kdf.is_empty() { "unknown" } else { st.kdf.as_str() },
                     st.id
                 );
                 if st.backend == "fat-fuse" {
@@ -602,6 +621,7 @@ fn run() -> Result<()> {
             );
             println!("hidden:        {}", vol.is_hidden);
             println!("encryption:    {}", vol.cipher.label());
+            println!("hash:          {}", vol.kdf);
             dismount_session(vol);
         }
         Commands::Chpasswd {
@@ -654,6 +674,10 @@ fn run() -> Result<()> {
                     container.display(),
                     infile.display()
                 );
+            }
+            HeaderCmd::Check { infile } => {
+                let n = inspect_header_backup(&infile)?;
+                println!("header backup ok {} ({} bytes of header slots)", infile.display(), n);
             }
         },
         Commands::Status => {
@@ -789,10 +813,28 @@ fn run() -> Result<()> {
             write_keyfile(&path, bytes)?;
             println!("wrote keyfile {} ({} bytes)", path.display(), bytes);
         }
+        Commands::Rescue { check } => {
+            println!("File-container recovery. This does not attach a system disk.");
+            println!("1. Boot a Linux live image with this dc binary.");
+            println!("2. dc info VOLUME   — confirm the password still opens the header.");
+            println!("3. dc header restore VOLUME BACKUP   — only if you have a DCHDR01 backup.");
+            println!("4. dc mount VOLUME MOUNTPOINT   — checkout mount. Use --live only if this process can stay open.");
+            println!("System encryption and /dev/mapper attach are not in this build.");
+            if let Some(path) = check {
+                let n = inspect_header_backup(&path)?;
+                println!("header backup ok {} ({} bytes of header slots)", path.display(), n);
+            }
+        }
         Commands::Platforms => {
             for line in dc_platform::platform_report() {
                 println!("{line}");
             }
+        }
+        Commands::Attach { device, mapper } => {
+            dc_platform::validate_helper_request(&device, &mapper)?;
+            bail!(
+                "refused: this build does not call dmsetup or cryptsetup. File containers use dc mount."
+            );
         }
     }
     Ok(())

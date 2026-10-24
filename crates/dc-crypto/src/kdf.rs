@@ -40,6 +40,19 @@ pub enum PrfId {
     Argon2id = 10,
 }
 
+impl PrfId {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Sha512 => "HMAC-SHA-512",
+            Self::Sha256 => "HMAC-SHA-256",
+            Self::Blake2s => "HMAC-BLAKE2s",
+            Self::Whirlpool => "HMAC-Whirlpool",
+            Self::Streebog => "HMAC-Streebog",
+            Self::Argon2id => "Argon2id",
+        }
+    }
+}
+
 /// VeraCrypt PBKDF2 iteration count for non-boot volumes.
 pub fn pbkdf2_iterations(prf: PrfId, pim: i32, boot: bool) -> u32 {
     let pim = if pim < 0 { 0 } else { pim };
@@ -144,7 +157,7 @@ pub fn derive_header_key_pbkdf2_sha512(
     Ok(())
 }
 
-/// VeraCrypt PBKDF2-HMAC-SHA256 header key. Same output size as SHA-512 (two AES-256 keys).
+/// VeraCrypt PBKDF2-HMAC-SHA256 header key. Fills `out` (at least 64 bytes).
 pub fn derive_header_key_pbkdf2_sha256(
     password: &[u8],
     keyfiles: &[&[u8]],
@@ -160,8 +173,7 @@ pub fn derive_header_key_pbkdf2_sha256(
     }
     let pwd = password_with_keyfiles(password, keyfiles);
     let iters = pbkdf2_iterations(PrfId::Sha256, pim, false);
-    pbkdf2::<HmacSha256>(&pwd, salt, iters, &mut out[..HEADER_XTS_KEY_SIZE])
-        .map_err(|_| KdfError::Pbkdf2)?;
+    pbkdf2::<HmacSha256>(&pwd, salt, iters, out).map_err(|_| KdfError::Pbkdf2)?;
     Ok(())
 }
 
@@ -247,7 +259,7 @@ pub fn derive_header_key_pbkdf2_blake2s(
     }
     let pwd = password_with_keyfiles(password, keyfiles);
     let iters = pbkdf2_iterations(PrfId::Blake2s, pim, false);
-    pbkdf2_hmac_blake2s(&pwd, salt, iters, &mut out[..HEADER_XTS_KEY_SIZE])
+    pbkdf2_hmac_blake2s(&pwd, salt, iters, out)
 }
 
 /// PBKDF2-HMAC-Whirlpool. The hash is the `whirlpool` crate.
@@ -279,7 +291,7 @@ pub fn derive_header_key_pbkdf2_whirlpool(
     }
     let pwd = password_with_keyfiles(password, keyfiles);
     let iters = pbkdf2_iterations(PrfId::Whirlpool, pim, false);
-    pbkdf2_hmac_whirlpool(&pwd, salt, iters, &mut out[..HEADER_XTS_KEY_SIZE])
+    pbkdf2_hmac_whirlpool(&pwd, salt, iters, out)
 }
 
 /// PBKDF2-HMAC-Streebog-512. The hash is the `streebog` crate.
@@ -311,7 +323,7 @@ pub fn derive_header_key_pbkdf2_streebog(
     }
     let pwd = password_with_keyfiles(password, keyfiles);
     let iters = pbkdf2_iterations(PrfId::Streebog, pim, false);
-    pbkdf2_hmac_streebog(&pwd, salt, iters, &mut out[..HEADER_XTS_KEY_SIZE])
+    pbkdf2_hmac_streebog(&pwd, salt, iters, out)
 }
 
 /// DC01 defaults: lower memory for interactive create on constrained CI (still Argon2id).

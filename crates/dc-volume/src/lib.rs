@@ -13,7 +13,7 @@ mod session;
 pub use cursor::{format_fat32, VolumeCursor};
 pub use favorites::{add_favorite, list_favorites, remove_favorite, Favorite};
 pub use fstype::FsType;
-pub use maintain::{backup_headers, change_password, restore_headers};
+pub use maintain::{backup_headers, change_password, inspect_header_backup, restore_headers};
 pub use session::{
     create_container, create_container_with_hidden, create_container_with_hidden_progress,
     create_container_with_progress, dismount_session, open_container, open_with_master_key,

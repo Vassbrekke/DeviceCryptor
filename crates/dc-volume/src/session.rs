@@ -71,6 +71,8 @@ pub struct MountedVolume {
     /// Outer volume's hidden region size when protect_hidden is active.
     pub hidden_protect_size: u64,
     pub cipher: VolumeCipher,
+    /// Password hash that opened this volume. DC01 is always Argon2id.
+    pub kdf: &'static str,
     pub(crate) file: File,
     xts: DiskXts,
     #[allow(dead_code)]
@@ -281,6 +283,7 @@ pub fn open_container(path: &Path, opts: &OpenOptions<'_>) -> Result<MountedVolu
             is_hidden: (h.flags & 1) != 0,
             hidden_protect_size: 0,
             cipher: VolumeCipher::Aes256,
+            kdf: "Argon2id",
             file,
             xts,
             master: h.master_key,
@@ -322,6 +325,7 @@ pub fn open_container(path: &Path, opts: &OpenOptions<'_>) -> Result<MountedVolu
             is_hidden: h.hidden_volume_size != 0,
             hidden_protect_size: 0,
             cipher: h.cipher,
+            kdf: h.prf.label(),
             file,
             xts,
             master: key_bytes,
@@ -360,6 +364,7 @@ pub fn open_container(path: &Path, opts: &OpenOptions<'_>) -> Result<MountedVolu
                 is_hidden: true,
                 hidden_protect_size: 0,
                 cipher: h.cipher,
+                kdf: h.prf.label(),
                 file,
                 xts,
                 master: key_bytes,
@@ -406,6 +411,7 @@ fn try_open_at(
         is_hidden,
         hidden_protect_size: 0,
         cipher: VolumeCipher::Aes256,
+        kdf: "Argon2id",
         file,
         xts,
         master: h.master_key,
@@ -494,6 +500,7 @@ pub fn open_with_master_key(
         is_hidden,
         hidden_protect_size: 0,
         cipher: VolumeCipher::Aes256,
+        kdf: "unknown",
         file,
         xts,
         master: SecureBytes::from_slice(master_key),

@@ -120,6 +120,23 @@ pub fn backup_headers(container: &Path, dest: &Path) -> Result<(), VolumeError> 
     Ok(())
 }
 
+/// Check a header backup file without writing to a container.
+pub fn inspect_header_backup(backup_file: &Path) -> Result<u64, VolumeError> {
+    let data = fs::read(backup_file)?;
+    if data.len() < 16 || &data[..8] != HDR_BACKUP_MAGIC {
+        return Err(VolumeError::Format(
+            "not a DeviceCryptor header backup".into(),
+        ));
+    }
+    let body_len = u64::from_le_bytes(data[8..16].try_into().unwrap());
+    if body_len != HDR_BACKUP_BODY || data.len() != 16 + body_len as usize {
+        return Err(VolumeError::Format(
+            "corrupt or unsupported header backup".into(),
+        ));
+    }
+    Ok(body_len)
+}
+
 /// Restore primary + hidden header slots from a `backup_headers` file.
 ///
 /// Only touches the first 128 KiB of the container. Does not rewrite backup headers
@@ -156,6 +173,23 @@ pub fn restore_headers(container: &Path, backup_file: &Path) -> Result<(), Volum
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn inspect_rejects_a_short_file_and_accepts_magic() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad.hdrbak");
+        std::fs::write(&bad, b"nope").unwrap();
+        assert!(inspect_header_backup(&bad).is_err());
+
+        let good = dir.path().join("good.hdrbak");
+        let mut f = std::fs::File::create(&good).unwrap();
+        f.write_all(b"DCHDR01\0").unwrap();
+        f.write_all(&HDR_BACKUP_BODY.to_le_bytes()).unwrap();
+        f.write_all(&vec![0u8; HDR_BACKUP_BODY as usize]).unwrap();
+        assert_eq!(inspect_header_backup(&good).unwrap(), HDR_BACKUP_BODY);
+    }
+
     use crate::session::{create_container, open_container, CreateOptions, OpenOptions};
     use tempfile::NamedTempFile;
 

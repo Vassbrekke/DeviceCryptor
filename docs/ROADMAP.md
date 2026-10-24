@@ -31,7 +31,7 @@ Status snapshot for **0.2.x** (Linux file-container path).
 
 - [ ] Privileged mount helper (dm-crypt/ublk) with clear IPC trust boundary
 - [ ] Linux initramfs unlock: full attach path (beyond header unlock scaffold)
-- [ ] Recovery workflow docs + rescue ISO notes
+- [x] Recovery workflow for file containers: `docs/RECOVERY.md`, `dc rescue`, `dc header check`. System-disk mapping and a rescue ISO are not in this build.
 - [ ] Windows filter driver + EFI PBA modules (see `boot/windows-uefi/MODULES.md`)
 
 ## 1.0 gates

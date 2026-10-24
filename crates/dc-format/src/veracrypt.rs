@@ -39,6 +39,8 @@ pub struct VeraCryptHeader {
     pub sector_size: u32,
     pub master_keys: SecureBytes,
     pub cipher: VolumeCipher,
+    /// Password hash that unlocked this header. Not stored on disk.
+    pub prf: PrfId,
 }
 
 #[derive(Clone, Debug)]
@@ -95,6 +97,19 @@ enum KdfKind {
     Pbkdf2Blake2s,
     Pbkdf2Whirlpool,
     Pbkdf2Streebog,
+}
+
+impl KdfKind {
+    fn prf(self) -> PrfId {
+        match self {
+            Self::Argon2id => PrfId::Argon2id,
+            Self::Pbkdf2Sha512 => PrfId::Sha512,
+            Self::Pbkdf2Sha256 => PrfId::Sha256,
+            Self::Pbkdf2Blake2s => PrfId::Blake2s,
+            Self::Pbkdf2Whirlpool => PrfId::Whirlpool,
+            Self::Pbkdf2Streebog => PrfId::Streebog,
+        }
+    }
 }
 
 fn try_with_kdf(
@@ -168,10 +183,56 @@ fn try_with_kdf(
             break;
         }
     }
-    if accepted.is_none() && matches!(kind, KdfKind::Pbkdf2Sha512) {
+    if accepted.is_none()
+        && matches!(
+            kind,
+            KdfKind::Pbkdf2Sha512
+                | KdfKind::Pbkdf2Sha256
+                | KdfKind::Pbkdf2Blake2s
+                | KdfKind::Pbkdf2Whirlpool
+                | KdfKind::Pbkdf2Streebog
+        )
+    {
         let mut wide = Zeroizing::new([0u8; 128]);
-        derive_header_key_pbkdf2_sha512(opts.password, opts.keyfiles, salt, opts.pim, wide.as_mut())
-            .map_err(|e| VeraCryptError::Crypto(e.to_string()))?;
+        let derived = match kind {
+            KdfKind::Pbkdf2Sha512 => derive_header_key_pbkdf2_sha512(
+                opts.password,
+                opts.keyfiles,
+                salt,
+                opts.pim,
+                wide.as_mut(),
+            ),
+            KdfKind::Pbkdf2Sha256 => derive_header_key_pbkdf2_sha256(
+                opts.password,
+                opts.keyfiles,
+                salt,
+                opts.pim,
+                wide.as_mut(),
+            ),
+            KdfKind::Pbkdf2Blake2s => derive_header_key_pbkdf2_blake2s(
+                opts.password,
+                opts.keyfiles,
+                salt,
+                opts.pim,
+                wide.as_mut(),
+            ),
+            KdfKind::Pbkdf2Whirlpool => derive_header_key_pbkdf2_whirlpool(
+                opts.password,
+                opts.keyfiles,
+                salt,
+                opts.pim,
+                wide.as_mut(),
+            ),
+            KdfKind::Pbkdf2Streebog => derive_header_key_pbkdf2_streebog(
+                opts.password,
+                opts.keyfiles,
+                salt,
+                opts.pim,
+                wide.as_mut(),
+            ),
+            _ => unreachable!(),
+        };
+        derived.map_err(|e| VeraCryptError::Crypto(e.to_string()))?;
         for cipher in [
             VolumeCipher::AesTwofish,
             VolumeCipher::KuznyechikTwofish,
@@ -192,6 +253,7 @@ fn try_with_kdf(
     let (buf, cipher) = accepted.ok_or(VeraCryptError::Auth)?;
     let mut header = parse_header(&buf)?;
     header.cipher = cipher;
+    header.prf = kind.prf();
     Ok(header)
 }
 
@@ -240,6 +302,7 @@ fn parse_header(
         sector_size: BigEndian::read_u32(&buf[64..68]),
         master_keys: master,
         cipher: VolumeCipher::Aes256,
+        prf: PrfId::Sha512,
     })
 }
 
@@ -316,6 +379,7 @@ mod tests {
         };
         let header = try_open_veracrypt_header(&data[..VC_HEADER_EFFECTIVE], &opts)
             .expect("vendor sha256 sample should unlock with password test");
+        assert_eq!(header.prf, PrfId::Sha256);
         assert_eq!(header.header_version, 5);
         assert_eq!(
             &decrypt_vendor_boot(&data, &header)[510..512],
@@ -496,6 +560,87 @@ mod tests {
     #[test]
     fn opens_minted_kuznyechik_aes_sample() {
         opens_cascade("kuznyechik-aes-sha512.hc", VolumeCipher::KuznyechikAes);
+    }
+
+    #[test]
+    fn opens_minted_aes_twofish_sha256_sample() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/goldens/aes-twofish-sha256.hc");
+        let data = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let opts = VeraCryptOpenOptions {
+            password: b"test",
+            keyfiles: &[],
+            pim: 0,
+            prf: Some(PrfId::Sha256),
+        };
+        let header = try_open_veracrypt_header(&data[..VC_HEADER_EFFECTIVE], &opts)
+            .expect("SHA-256 AES-Twofish volume should unlock");
+        assert_eq!(header.cipher, VolumeCipher::AesTwofish);
+        assert_eq!(
+            &decrypt_vendor_boot(&data, &header)[510..512],
+            &[0x55, 0xAA]
+        );
+    }
+
+    #[test]
+    fn opens_minted_aes_twofish_blake2s_sample() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/goldens/aes-twofish-blake2s.hc");
+        let data = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let opts = VeraCryptOpenOptions {
+            password: b"test",
+            keyfiles: &[],
+            pim: 0,
+            prf: Some(PrfId::Blake2s),
+        };
+        let header = try_open_veracrypt_header(&data[..VC_HEADER_EFFECTIVE], &opts)
+            .expect("BLAKE2s AES-Twofish volume should unlock");
+        assert_eq!(header.cipher, VolumeCipher::AesTwofish);
+        assert_eq!(
+            &decrypt_vendor_boot(&data, &header)[510..512],
+            &[0x55, 0xAA]
+        );
+    }
+
+    #[test]
+    fn opens_minted_aes_twofish_whirlpool_sample() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/goldens/aes-twofish-whirlpool.hc");
+        let data = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let opts = VeraCryptOpenOptions {
+            password: b"test",
+            keyfiles: &[],
+            pim: 0,
+            prf: Some(PrfId::Whirlpool),
+        };
+        let header = try_open_veracrypt_header(&data[..VC_HEADER_EFFECTIVE], &opts)
+            .expect("Whirlpool AES-Twofish volume should unlock");
+        assert_eq!(header.cipher, VolumeCipher::AesTwofish);
+        assert_eq!(
+            &decrypt_vendor_boot(&data, &header)[510..512],
+            &[0x55, 0xAA]
+        );
+    }
+
+    /// Slow in debug: 500k Streebog, twice (64-byte try, then 128-byte cascade).
+    #[test]
+    fn opens_minted_aes_twofish_streebog_sample() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/goldens/aes-twofish-streebog.hc");
+        let data = std::fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let opts = VeraCryptOpenOptions {
+            password: b"test",
+            keyfiles: &[],
+            pim: 0,
+            prf: Some(PrfId::Streebog),
+        };
+        let header = try_open_veracrypt_header(&data[..VC_HEADER_EFFECTIVE], &opts)
+            .expect("Streebog AES-Twofish volume should unlock");
+        assert_eq!(header.cipher, VolumeCipher::AesTwofish);
+        assert_eq!(
+            &decrypt_vendor_boot(&data, &header)[510..512],
+            &[0x55, 0xAA]
+        );
     }
 
     #[test]

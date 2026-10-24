@@ -39,6 +39,7 @@ Pass `--prf sha512` (or `sha256`, `blake2s`, `whirlpool`, `streebog`, `argon2`) 
 
 # Header safety net before experiments
 ./target/release/dc header backup ./test.dc ./test.hdrbak
+./target/release/dc header check ./test.hdrbak
 ./target/release/dc header restore ./test.dc ./test.hdrbak
 
 ./target/release/dc status

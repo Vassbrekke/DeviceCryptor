@@ -117,6 +117,34 @@ pub fn platform_report() -> Vec<&'static str> {
     }
 }
 
+/// Check a future privileged-helper request.
+///
+/// The password and the master key are not arguments. A mapper name is a single
+/// token. A device path must be an absolute `/dev/` path with no `..`.
+/// This does not call dmsetup or cryptsetup.
+pub fn validate_helper_request(device: &str, mapper: &str) -> Result<(), PlatformError> {
+    if mapper.is_empty()
+        || mapper.len() > 64
+        || !mapper
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+    {
+        return Err(PlatformError::Message(
+            "mapper name must be 1..=64 of [A-Za-z0-9._-]".into(),
+        ));
+    }
+    if !device.starts_with("/dev/")
+        || device.contains('\0')
+        || device.contains('\n')
+        || device.split('/').any(|p| p == "..")
+    {
+        return Err(PlatformError::Message(
+            "device must be an absolute /dev path with no ..".into(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::platform_report;
@@ -129,5 +157,14 @@ mod tests {
         assert!(lines.contains(&"mount-fat-checkout: yes"));
         #[cfg(target_os = "linux")]
         assert!(lines.contains(&"mount-fat-fuse: yes"));
+    }
+
+    #[test]
+    fn helper_request_rejects_a_password_shaped_mapper_and_a_dotdot_device() {
+        use super::validate_helper_request;
+        assert!(validate_helper_request("/dev/sda1", "dcroot").is_ok());
+        assert!(validate_helper_request("/dev/sda1", "bad/name").is_err());
+        assert!(validate_helper_request("/dev/../etc/passwd", "dcroot").is_err());
+        assert!(validate_helper_request("/home/jarvis/vol.dc", "dcroot").is_err());
     }
 }

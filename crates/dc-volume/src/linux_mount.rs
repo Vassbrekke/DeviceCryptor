@@ -47,6 +47,9 @@ pub struct MountState {
     /// Disk cipher label. Empty on states written before cipher tracking.
     #[serde(default)]
     pub cipher: String,
+    /// Password hash label. Empty on states written before hash tracking.
+    #[serde(default)]
+    pub kdf: String,
 }
 
 const SESSION_MAGIC: &[u8; 8] = b"DCSESS01";
@@ -549,6 +552,7 @@ fn mount_fat_live(
     protect: u64,
 ) -> Result<MountState, VolumeError> {
     let cipher = vol.lock().unwrap().cipher.label().to_string();
+    let kdf = vol.lock().unwrap().kdf.to_string();
     let session = crate::fuse_fat::spawn_live(vol, protect, opts.mountpoint)?;
     crate::fuse_fat::keep_live(opts.id, session);
     let st = MountState {
@@ -563,6 +567,7 @@ fn mount_fat_live(
         protect_hidden: protect,
         session_store: String::new(),
         cipher,
+        kdf,
     };
     if let Err(e) = save_mount_state(&st) {
         crate::fuse_fat::drop_live(opts.id);
@@ -593,6 +598,10 @@ fn mount_fat_checkout(
         let _ = wipe_session_key(opts.id);
         return Err(VolumeError::Io(e));
     }
+    let (cipher, kdf) = {
+        let g = vol.lock().unwrap();
+        (g.cipher.label().to_string(), g.kdf.to_string())
+    };
     let st = MountState {
         id: opts.id.to_string(),
         container: container.to_path_buf(),
@@ -604,7 +613,8 @@ fn mount_fat_checkout(
         fs: "fat32".into(),
         protect_hidden: protect,
         session_store: session_store_of(opts.id),
-        cipher: vol.lock().unwrap().cipher.label().to_string(),
+        cipher,
+        kdf,
     };
     if let Err(e) = save_mount_state(&st) {
         let _ = wipe_session_key(opts.id);
@@ -727,6 +737,7 @@ fn mount_loop(
     let raw = dir.join(format!("{}.raw", opts.id));
     export_raw_image(Arc::clone(&vol), &raw)?;
     let cipher = vol.lock().unwrap().cipher.label().to_string();
+    let kdf = vol.lock().unwrap().kdf.to_string();
     drop(vol);
 
     let out = Command::new("losetup")
@@ -772,6 +783,7 @@ fn mount_loop(
         protect_hidden: 0,
         session_store: session_store_of(opts.id),
         cipher,
+        kdf,
     };
     save_mount_state(&st)?;
     Ok(st)
